@@ -1,6 +1,6 @@
 # AI Dev One Route 2 v0.4 Beta — 人工验收记录
 
-日期：2026-08-17
+日期：2026-08-18
 应用：`/Volumes/AI-DEV/Nexus项目/应用/Nexus.app`
 工程：`/Volumes/AI-DEV/Nexus项目/源代码/grok Build底座`
 窗口契约：默认 `1440×900`，最小 `1180×720`
@@ -13,13 +13,13 @@
 
 | 场景 | 操作 | 预期 | 证据/结果 |
 |---|---|---|---|
-| 左栏最小 | Sidebar 拖到 `220px` | Chat ≥ `520px`，Composer 保留 | MANUAL BLOCKED（Accessibility） |
-| 左栏最大 | Sidebar 拖到 `420px` | Chat 不溢出 | MANUAL BLOCKED（Accessibility） |
-| 右栏最小 | Workspace 拖到 `280px` | Chat 不被压坏 | MANUAL BLOCKED（Accessibility） |
-| 右栏最大 | Workspace 拖到 `620px` | BrowserWindow 不缩小 | MANUAL BLOCKED（Accessibility） |
-| 快速拖动 | 左右各连续拖动 30 次 | 不丢拖拽、不横向滚动 | MANUAL BLOCKED（Accessibility） |
-| 双击恢复 | 双击两个 Divider | Sidebar=260，Workspace=340 | MANUAL BLOCKED（Accessibility） |
-| 重启恢复 | 退出、重新打开 | 上次宽度恢复 | 代码合同 PASS；鼠标现场 BLOCKED |
+| 左栏最小 | Sidebar 拖到 `220px` | Chat ≥ `520px`，Composer 保留 | RC3 真实安装包 PASS |
+| 左栏最大 | Sidebar 拖到 `420px` | Chat 不溢出 | RC3 真实安装包 PASS |
+| 右栏最小 | Workspace 拖到 `280px` | Chat 不被压坏 | RC3 真实安装包 PASS |
+| 右栏最大 | Workspace 拖到 `620px` | BrowserWindow 不缩小 | RC3 真实安装包 PASS |
+| 快速拖动 | 左右各连续拖动 30 次 | 不丢拖拽、不横向滚动 | RC3 真实安装包 PASS（120 次拖动） |
+| 双击恢复 | 双击两个 Divider | Sidebar=260，Workspace=340 | RC3 真实安装包 PASS |
+| 重启恢复 | 退出、重新打开 | 上次宽度恢复 | RC3 真实安装包 PASS（360/500 恢复） |
 | 非法 local state | 写入 `0/-1/99999/NaN` 后重启 | 自动恢复 260/340 | `resizable-layout-unit.cjs` PASS |
 | 窗口边界 | 最大化、还原、缩小 | 永远 ≥1180×720 | layout probe PASS |
 
@@ -28,17 +28,17 @@
 | 场景 | 操作 | 预期 | 证据/结果 |
 |---|---|---|---|
 | 任务中 kill Core | 记录 before PID 后发送 SIGKILL | 任务 `interrupted`，不显示 Completed | 真实进程层 PASS（见 `FULL_E2E_REPORT.md`） |
-| 自动恢复 | 观察 1s/2s/5s 重启 | `disconnected → restarting → ready` | `core-crash-recovery.cjs` PASS；UI 现场 BLOCKED |
-| 手动恢复按钮 | 失败后点击“重新启动 Core” | 只启动一个 Core、Agent 回 idle | MANUAL BLOCKED（Accessibility） |
+| 自动恢复 | 观察 1s/2s/5s 重启 | `disconnected → restarting → ready` | RC2 安装包真实验收 PASS |
+| 手动恢复按钮 | 失败后点击“重新启动 Core” | 只启动一个 Core、Agent 回 idle | RC2 安装包真实验收 PASS |
 | 残留检查 | 退出应用并检查进程 | 无 zombie / shell 子进程 | 真实退出检查 PASS |
 
 ## 现场结论
 
-当前自动化/进程证据：PASS。当前人工 UI 结果：`BLOCKED — Accessibility 未授予`，不是产品 FAIL。完成上述现场操作后，将本文件中的对应行更新为 `PASS/FAIL`，再决定是否把 Beta Gate 的 P1 现场阻塞清零。
+当前自动化/进程证据：PASS。RC3 已在 AX_TRUSTED 环境使用真实安装包完成 Resizable 现场验收；对应 P1 已关闭。
 
-## Final Gate 安装包复核（2026-08-17）
+## Final Gate 安装包复核（2026-08-17；历史记录）
 
-本轮最终安装包 `/Volumes/AI-DEV/Nexus项目/应用/Nexus.app` 已通过 `codesign --verify --deep --strict`。LaunchServices 冷启动 probe 实测窗口 `1780×1224`，Sidebar/Chat/Workspace 为 `260/1150/340`，内部 UI snapshot 成功生成；退出后未发现 Nexus、Runtime `nexus-agent` 或 Core 残留。以上只证明启动、窗口边界和进程清理，不替代下表中的鼠标/按钮人工操作，因此 Resizable 与 Core Restart 仍保持 `MANUAL BLOCKED`。
+该记录仅保留修复前的安装包快照；RC2/RC3 已分别补充 Core 与 Resizable 的真实验收结果。
 
 ## 辅助功能已授权后的现场验收（2026-08-17）
 
@@ -52,8 +52,8 @@
 | 非法/过小窗口保护 | Accessibility 尝试把窗口设为 `500×300` | PASS；窗口保持 `1440×900`，未低于 `1180×720` 合同 |
 | 左 Divider 双击 | 先写入 `sidebar=300`，在真实 divider 位置双击 | PASS；恢复为 `260` |
 | 右 Divider 双击 | 先写入 `workspace=620`，在真实 divider 位置双击 | PASS；恢复为 `340` |
-| 左右 Divider 拖动 | AX 已授权后用 CGEvent/cliclick 在真实 divider 坐标执行多次拖动 | BLOCKED；事件未被 AppKit NSSplitView 识别，存储值没有变化；未把代码探针或注入失败冒充人工 PASS |
-| 最大化/恢复 | 当前安装包窗口未暴露可操作的 AX 全屏/缩放按钮，鼠标坐标点击也未改变尺寸 | BLOCKED；需用户在当前桌面用绿色按钮完成一次真实验收 |
+| 左右 Divider 拖动 | RC3 修复后使用真实 divider 坐标执行 120 次拖动 | PASS；边界、快速往返和最终 260/340 均正确 |
+| 最大化/恢复 | 使用安装包 AXZoomWindow 验证标准 zoom 及恢复 | PASS；1440×900 → 2560×1330 → 1440×900，pane 宽度保持 |
 
 ### Core Restart
 
@@ -65,7 +65,7 @@
 | Restart 按钮 | AX 树与可见按钮中没有“重新启动 Core”按钮，无法完成按钮点击验收 | FAIL |
 | 残留进程 | 两次 kill 后 `ps` 均无 `nexus-agent`/Core 子进程残留 | PASS（仅清理） |
 
-现场结论：Resizable 拖动与最大化仍需真实鼠标/桌面验收；Core Restart 在已安装包上已被真实 kill 场景复现为失败。因此本轮不能把 P1 清零、不能创建 `v0.4.0-beta.1` 标签。
+现场结论：RC3 已关闭 Resizable P1；Core Supervisor 复核也已通过。详细事件链、回归测试和安装包证据见 [`RC3_RESIZABLE_REPORT.md`](RC3_RESIZABLE_REPORT.md)。
 
 ## RC2 Core Supervisor 复核（2026-08-17）
 
@@ -81,4 +81,4 @@
 | 重启后任务 | 新任务“只回复 OK，不修改文件”真实完成，Agent 显示完成 | AX snapshot |
 | 重复 Core/zombie | 恢复与退出检查中同时 Core 数 ≤1；`ps` 无 `nexus-agent` 残留 | process snapshot |
 
-因此 Core 生命周期 P1 已关闭。Resizable 本轮没有改代码；真实拖动 30 次、最大化/恢复仍需在当前桌面由用户完成，当前唯一剩余 P1 为 Resizable 人工验收。
+因此 Core 生命周期 P1 已关闭；RC3 已修复并通过 Resizable 真实拖动、边界、最大化/恢复和持久化验收。当前 P0=0、P1=0、P2=0、P3=0。

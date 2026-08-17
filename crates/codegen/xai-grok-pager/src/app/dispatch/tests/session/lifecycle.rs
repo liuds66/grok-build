@@ -458,7 +458,7 @@ fn new_worktree_session_rejects_non_git_cwd() {
     let warning = app
         .startup_warnings
         .iter()
-        .find(|warning| warning.message.contains("Not inside a git repository"))
+        .find(|warning| warning.message.contains("当前目录不在 Git 仓库中"))
         .expect("expected git-repo warning");
     assert_eq!(warning.severity, crate::startup::WarningSeverity::Warning);
     assert!(warning.action.is_none());

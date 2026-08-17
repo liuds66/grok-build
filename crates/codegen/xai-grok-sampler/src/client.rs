@@ -406,7 +406,7 @@ impl SamplingClient {
                 AuthScheme::XApiKey => {
                     let header_value = HeaderValue::from_str(api_key).map_err(|_| {
                         tracing::debug!(
-                            api_key = %api_key,
+                            api_key_present = true,
                             "Invalid api_key: cannot be converted to a valid HTTP header"
                         );
                         SamplingError::Auth(
@@ -420,7 +420,7 @@ impl SamplingClient {
                     let bearer = format!("Bearer {}", api_key);
                     let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
                         tracing::debug!(
-                            api_key = %api_key,
+                            api_key_present = true,
                             "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
                         );
                         SamplingError::Auth(
@@ -568,14 +568,6 @@ impl SamplingClient {
             }
         }
         {
-            let auth_prefix = headers
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(20).collect::<String>());
-            let x_api_key_prefix = headers
-                .get(HeaderName::from_static("x-api-key"))
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(12).collect::<String>());
             tracing::info!(
                 target: crate::sampling_log::TARGET,
                 event = "client_post",
@@ -586,8 +578,6 @@ impl SamplingClient {
                 has_bearer_resolver = self.bearer_resolver.is_some(),
                 has_authorization_header = headers.get(AUTHORIZATION).is_some(),
                 has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
-                auth_header_prefix = auth_prefix.as_deref().unwrap_or("none"),
-                x_api_key_prefix = x_api_key_prefix.as_deref().unwrap_or("none"),
             );
         }
         if let Some(injector) = &self.header_injector {
@@ -664,7 +654,7 @@ impl SamplingClient {
         };
         crate::sampling_log::AuthInfo {
             auth_type,
-            auth_prefix,
+            has_credentials: auth_prefix.is_some(),
         }
     }
 
@@ -680,7 +670,28 @@ impl SamplingClient {
 
     /// Short lossy body snippet for error logs (never user-facing).
     fn body_preview(bytes: &[u8]) -> String {
-        String::from_utf8_lossy(bytes).chars().take(500).collect()
+        let raw = String::from_utf8_lossy(bytes);
+        let redacted = Self::redact_sensitive_text(&raw);
+        redacted.chars().take(500).collect()
+    }
+
+    /// Redact credential-shaped values before an upstream response or
+    /// diagnostic string reaches tracing/log files. API providers commonly
+    /// echo the rejected key in a 401 body, so truncating alone is not safe.
+    fn redact_sensitive_text(input: &str) -> String {
+        let mut result = input.to_string();
+        let patterns = [
+            (r#"(?i)sk-[^"\s,}\]]+"#, "[REDACTED]"),
+            (r#"(?i)xai-[^"\s,}\]]+"#, "[REDACTED]"),
+            (r#"(?i)(bearer\s+)[A-Za-z0-9._~+\-/=]+"#, "$1[REDACTED]"),
+            (r#"(?i)((?:api[_-]?key|token|secret)\s*[=:]\s*)[^"\s,}\]]+"#, "$1[REDACTED]"),
+        ];
+        for (pattern, replacement) in patterns {
+            if let Ok(expression) = regex::Regex::new(pattern) {
+                result = expression.replace_all(&result, replacement).into_owned();
+            }
+        }
+        result
     }
 
     /// Log all headers from a request at debug level (redacting sensitive values).

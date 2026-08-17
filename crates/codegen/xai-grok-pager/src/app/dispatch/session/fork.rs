@@ -530,7 +530,7 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
         app.restore_code = None;
         agent.prompt.file_search.retarget(&session_cwd);
         agent.scrollback.push_block(RenderBlock::system(format!(
-            "Worktree ready: {}",
+            "工作区已就绪：{}",
             worktree_path.display()
         )));
         match (code_restored, restore_summary.as_deref()) {

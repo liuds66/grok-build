@@ -1,0 +1,35 @@
+# Nexus 模型预设：本地 Ollama 服务。
+# 启动 Nexus 前，请先启动 Ollama 并拉取一个支持工具调用的编码模型。
+
+[cli]
+auto_update = false
+
+[models]
+default = "ollama-coding"
+max_completion_tokens = 8192
+session_summary = "qwen2.5-coder:14b"
+image_description = "qwen2.5-coder:14b"
+
+[model.ollama-coding]
+# 请替换为 `ollama list` 显示的准确本地模型名称。
+model = "qwen2.5-coder:14b"
+base_url = "http://localhost:11434/v1"
+name = "本地 Ollama 编码模型"
+description = "本地 OpenAI 兼容推理服务"
+api_backend = "chat_completions"
+context_window = 32768
+
+[sandbox]
+profile = "workspace"
+
+[ui]
+default_selected_permission = "allow_once"
+remember_tool_approvals = true
+
+[features]
+telemetry = false
+remote_fetch = false
+codebase_indexing = true
+
+[telemetry]
+trace_upload = false

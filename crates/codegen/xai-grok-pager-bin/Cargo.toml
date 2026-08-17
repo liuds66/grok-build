@@ -15,6 +15,13 @@ default-run = "xai-grok-pager"
 name = "xai-grok-pager"
 path = "src/main.rs"
 
+# Nexus is an independently branded distribution layer over this runtime. It
+# intentionally shares the composition root so upstream runtime fixes remain
+# straightforward to merge.
+[[bin]]
+name = "nexus-agent"
+path = "src/nexus_main.rs"
+
 [dependencies]
 # The pager library (all application logic + the public API main.rs drives).
 xai-grok-pager = { path = "../xai-grok-pager" }

@@ -1,0 +1,38 @@
+# Nexus 模型预设：OpenRouter 的 OpenAI 兼容端点。
+# 推荐运行 nexus settings set-key openrouter 将密钥保存到受限权限的本地配置。
+# OPENROUTER_API_KEY 环境变量仍可作为备用方式。
+
+[cli]
+auto_update = false
+
+[models]
+default = "openrouter-coding"
+max_completion_tokens = 8192
+stream_tool_calls = true
+session_summary = "openai/gpt-4.1"
+image_description = "openai/gpt-4.1"
+
+[model.openrouter-coding]
+# 请选择你的 OpenRouter 账号中支持工具调用的模型。
+model = "openai/gpt-4.1"
+base_url = "https://openrouter.ai/api/v1"
+name = "OpenRouter 编码模型"
+description = "使用你自己的 API Key 访问 OpenAI 兼容端点"
+api_backend = "chat_completions"
+env_key = "OPENROUTER_API_KEY"
+context_window = 1048576
+
+[sandbox]
+profile = "workspace"
+
+[ui]
+default_selected_permission = "allow_once"
+remember_tool_approvals = true
+
+[features]
+telemetry = false
+remote_fetch = false
+codebase_indexing = true
+
+[telemetry]
+trace_upload = false

@@ -28,7 +28,7 @@ const LOGO_H_PAD: u16 = 3;
 /// message never paints over the button.
 const UPGRADE_CTA_ROWS: u16 = 2;
 
-const HERO_SUBTITLE: &str = "Thanks for trying Grok Build, give feedback with /feedback!";
+const HERO_SUBTITLE: &str = "感谢使用 Nexus，可通过 /feedback 提交反馈！";
 
 use super::{PROMPT_HEIGHT, VERSION_GAP};
 
@@ -523,7 +523,7 @@ fn render_hero_changelog(
             .fg(theme.gray_bright)
             .add_modifier(Modifier::DIM),
     );
-    let title = "Changelog";
+    let title = "更新日志";
     buf.set_span(
         area.x,
         area.y,

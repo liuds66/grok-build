@@ -88,7 +88,7 @@ fn resolve_agent_profile_path(path: &std::path::Path) -> std::path::PathBuf {
 /// Print startup information for the serve command.
 fn print_serve_startup_info(bind_addr: SocketAddr, secret: &str) {
     eprintln!();
-    eprintln!("   Grok agent server starting...");
+    eprintln!("   {} agent server starting...", product_name());
     eprintln!();
     eprintln!("   Address:  {}:{}", bind_addr.ip(), bind_addr.port());
     eprintln!("   Secret:   {}", secret);
@@ -101,6 +101,29 @@ fn print_serve_startup_info(bind_addr: SocketAddr, secret: &str) {
 }
 /// Entrypoint tag for `grok -p`; keys the quiet stderr default in `init_tracing_simple`.
 const HEADLESS_ENTRYPOINT: &str = "headless";
+
+/// The composition root produces both the upstream binary and the independently
+/// branded Nexus binary. Keep crate identities untouched so upstream updates
+/// remain mergeable; only user-visible entry points are branded here.
+fn product_name() -> &'static str {
+    let binary_path = std::env::args().next();
+    let binary_name = binary_path
+        .as_deref()
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .and_then(|name| name.to_str());
+    match binary_name {
+        Some("nexus-agent") | Some("nexus") => "Nexus",
+        _ => "Grok",
+    }
+}
+
+fn product_cli_name() -> &'static str {
+    if product_name() == "Nexus" {
+        "nexus"
+    } else {
+        "grok"
+    }
+}
 /// Initialize simple tracing for non-TUI agent modes.
 fn init_tracing_simple(app_entrypoint: &'static str) {
     use tracing_subscriber::{EnvFilter, Layer as _, fmt, layer::SubscriberExt as _};
@@ -1044,7 +1067,8 @@ async fn run_agent_command(
     let is_leader = matches!(agent_args.mode, Some(AgentCmd::Leader(_)));
     if !is_stdio && !is_leader {
         eprintln!(
-            "Grok Build (pager) - v{}",
+            "{} coding agent - v{}",
+            product_name(),
             xai_grok_version::display_version_with_commit(
                 env!("VERSION_WITH_COMMIT"),
                 xai_grok_update::channel_label(),
@@ -1621,7 +1645,8 @@ fn install_heap_profile_hooks() {
 }
 fn version_text(channel_label: &str) -> String {
     format!(
-        "grok {}\n",
+        "{} {}\n",
+        product_cli_name(),
         xai_grok_version::display_version_with_commit(env!("VERSION_WITH_COMMIT"), channel_label,)
     )
 }
@@ -1652,6 +1677,12 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     true
 }
 fn main() {
+    run();
+}
+
+/// Run the shared Grok Build/Nexus composition root. Keeping this callable
+/// enables the separately branded Cargo binary without copying the runtime.
+pub fn run() {
     if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
     }

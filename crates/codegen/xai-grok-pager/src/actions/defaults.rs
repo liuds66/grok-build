@@ -517,8 +517,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::CycleMode,
-            label: "mode",
-            description: "Cycle mode (Normal / Plan / Always-approve)",
+            label: "模式",
+            description: "切换模式（普通 / 计划 / 始终批准）",
             // All Shift+Tab encodings — see `input::key::shift_tab_keys()`.
             default_key: crate::input::key::shift_tab_keys()[0],
             alt_keys: crate::input::key::shift_tab_keys()[1..].to_vec(),
@@ -763,7 +763,7 @@ pub(super) fn default_actions(
         ActionDef {
             id: ActionId::Quit,
             label: "quit",
-            description: "Quit",
+            description: "退出",
             default_key: if in_vscode {
                 key!('d', CONTROL)
             } else {
@@ -800,8 +800,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::ShortcutsHelp,
-            label: "shortcuts",
-            description: "Keyboard shortcuts",
+            label: "快捷键",
+            description: "键盘快捷键",
             default_key: if ctrl_dot_unreliable {
                 key!('x', CONTROL)
             } else {
@@ -978,8 +978,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::DashboardCycleMode,
-            label: "mode",
-            description: "Cycle dispatch mode",
+            label: "模式",
+            description: "切换派发模式",
             // All Shift+Tab encodings — see `input::key::shift_tab_keys()`.
             // Registry `matches` is exact-modifier, so the SHIFT-bearing
             // forms must be alts.
@@ -1042,8 +1042,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::DashboardShortcutsHelp,
-            label: "shortcuts",
-            description: "Show shortcuts overlay",
+            label: "快捷键",
+            description: "显示快捷键面板",
             // Ctrl+. / `?` dual-bound; primary follows ctrl_dot_unreliable.
             // Ctrl+X is DashboardStop — never an alt here.
             default_key: if ctrl_dot_unreliable {

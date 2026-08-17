@@ -1,0 +1,38 @@
+# Nexus 模型预设：兼容 OpenAI 的 Responses API。
+# 推荐运行 nexus settings set-key openai 将密钥保存到受限权限的本地配置。
+# OPENAI_API_KEY 环境变量仍可作为备用方式。
+
+[cli]
+auto_update = false
+
+[models]
+default = "openai-coding"
+max_completion_tokens = 8192
+stream_tool_calls = true
+session_summary = "gpt-4.1"
+image_description = "gpt-4.1"
+
+[model.openai-coding]
+# 请改成你的账号实际可用的编码模型标识。
+model = "gpt-4.1"
+base_url = "https://api.openai.com/v1"
+name = "OpenAI 编码模型"
+description = "使用你自己的 API Key 访问 OpenAI Responses API"
+api_backend = "responses"
+env_key = "OPENAI_API_KEY"
+context_window = 1048576
+
+[sandbox]
+profile = "workspace"
+
+[ui]
+default_selected_permission = "allow_once"
+remember_tool_approvals = true
+
+[features]
+telemetry = false
+remote_fetch = false
+codebase_indexing = true
+
+[telemetry]
+trace_upload = false

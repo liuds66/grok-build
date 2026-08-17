@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# 构建原生 macOS Nexus 桌面应用。
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd)"
+source_file="${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+source_dir="${repo_root}/apps/nexus-desktop/Sources/NexusDesktop"
+info_template="${repo_root}/apps/nexus-desktop/Info.plist"
+build_root="${NEXUS_DESKTOP_BUILD_DIR:-${repo_root}/dist}"
+app_bundle="${build_root}/Nexus.app"
+contents="${app_bundle}/Contents"
+macos_dir="${contents}/MacOS"
+resources_dir="${contents}/Resources"
+agent_bin="${NEXUS_BUILD_TARGET_DIR:-${HOME}/.cache/nexus/target}/release/nexus-agent"
+local_runtime_dir="${NEXUS_DESKTOP_RUNTIME_DIR:-${HOME}/Library/Application Support/AI Dev One/Runtime}"
+module_cache="${NEXUS_SWIFT_MODULE_CACHE:-${TMPDIR:-/tmp}/nexus-swift-module-cache}"
+swift_working_dir="${NEXUS_SWIFT_WORKING_DIR:-${TMPDIR:-/tmp}/nexus-swift-working-dir}"
+
+command -v swiftc >/dev/null 2>&1 || {
+  echo "未找到 Swift 编译器。请先安装 Xcode Command Line Tools。" >&2
+  exit 127
+}
+
+if [[ ! -x "${agent_bin}" ]]; then
+  echo "尚未找到 Nexus 编码代理，先进行构建……"
+  "${repo_root}/scripts/build-nexus"
+fi
+
+mkdir -p "${macos_dir}" "${resources_dir}" "${contents}/config/presets" "${module_cache}"
+mkdir -p "${swift_working_dir}"
+
+# Swift 的工作目录固定在本机临时目录。源码和产物仍来自项目，
+# 但不会让编译器在外置盘目录上等待目录锁或 I/O。
+(
+  cd "${swift_working_dir}"
+  swiftc \
+    -O \
+    -module-cache-path "${module_cache}" \
+    -framework AppKit \
+    -framework Foundation \
+    -framework LocalAuthentication \
+    -framework Security \
+    -target x86_64-apple-macos12.0 \
+    -o "${macos_dir}/Nexus" \
+    "${source_dir}"/*.swift
+)
+
+escaped_root="${repo_root//&/\\&}"
+escaped_root="${escaped_root//|/\\|}"
+sed "s|__NEXUS_DEFAULT_PROJECT__|${escaped_root}|g" \
+  "${info_template}" > "${contents}/Info.plist"
+
+cp "${repo_root}/bin/nexus" "${resources_dir}/nexus"
+cp "${agent_bin}" "${resources_dir}/nexus-agent"
+cp "${repo_root}"/config/presets/*.toml "${contents}/config/presets/"
+chmod 755 "${macos_dir}/Nexus" "${resources_dir}/nexus" "${resources_dir}/nexus-agent"
+
+# 任务启动不能依赖外置盘上的大体积 Rust 二进制。保留 App 包内资源
+# 作为回退，同时把运行时放到本机 Application Support，避免批准任务时
+# AppKit 主窗口因外置盘 I/O 暂停。
+mkdir -p "${local_runtime_dir}"
+cp "${repo_root}/bin/nexus" "${local_runtime_dir}/nexus"
+cp "${agent_bin}" "${local_runtime_dir}/nexus-agent"
+chmod 755 "${local_runtime_dir}/nexus" "${local_runtime_dir}/nexus-agent"
+
+codesign --force --deep --sign - "${app_bundle}" >/dev/null
+echo "桌面应用已构建：${app_bundle}"

@@ -48,8 +48,9 @@ pub struct SkillsConfig {
 
 /// List all discovered skills with their metadata.
 ///
-/// Priority order: Local (cwd/.grok/skills, cwd/.agents/skills, cwd/.claude/skills) → Intermediate dirs →
-/// Repo (repo_root/.grok/skills, repo_root/.agents/skills, repo_root/.claude/skills) → User (~/.grok/skills, ~/.agents/skills, ~/.claude/skills)
+/// Priority order: Local (cwd/.grok/skills, cwd/.agents/skills,
+/// cwd/.claude/skills, cwd/.codex/skills) → Intermediate dirs →
+/// Repo equivalents → User equivalents
 /// → additional paths from `config.paths`
 /// → Server (injected `config.server_skill_dirs`)
 /// → Bundled (injected `config.bundled_skill_dirs` + `~/.grok/bundled`; lowest precedence).
@@ -59,7 +60,7 @@ pub struct SkillsConfig {
 ///
 /// When `working_directory` is `None`, only User-scoped skills are returned.
 ///
-/// `compat` gates which vendor (`.claude`/`.cursor`) dirs are scanned; pass
+/// `compat` gates which vendor (`.claude`/`.cursor`/`.codex`) dirs are scanned; pass
 /// `CompatConfig::default()` to preserve the historical all-vendors behavior.
 pub async fn list_skills(
     working_directory: Option<&str>,
@@ -167,9 +168,9 @@ pub fn collect_skill_config_dirs(
         }
     };
 
-    // Vendor dirs (`.claude`/`.cursor`) are gated by the resolved compat
+    // Vendor dirs (`.claude`/`.cursor`/`.codex`) are gated by the resolved compat
     // config; `.grok` and `.agents` are always present. When all cells are on
-    // this list equals the historical `[".grok", ".agents", ".claude", ".cursor"]`.
+    // this list includes `[".grok", ".agents", ".claude", ".cursor", ".codex"]`.
     let config_dir_names = compat.skill_config_dirs();
 
     // Priority 1 & 2: Walk from cwd up to the git root.
@@ -201,7 +202,7 @@ pub fn collect_skill_config_dirs(
 
     // Priority 3: Global user dirs. `.grok` comes from `grok_home` (which may
     // be overridden), so it's handled separately; `.agents` is always added,
-    // while `.claude`/`.cursor` are gated by the skills compat cells.
+    // while `.claude`/`.cursor`/`.codex` are gated by the skills compat cells.
     try_add(grok_home);
     #[allow(deprecated)]
     if let Some(home) = std::env::home_dir() {
@@ -211,6 +212,9 @@ pub fn collect_skill_config_dirs(
         }
         if compat.cursor.skills {
             try_add(home.join(".cursor"));
+        }
+        if compat.codex.skills {
+            try_add(home.join(".codex"));
         }
     }
 
@@ -232,7 +236,7 @@ pub fn collect_skill_config_dirs(
 /// Determine the skill scope for a config directory based on its location
 /// relative to `cwd`, `git_root`, and the user's home directory.
 fn scope_for_config_dir(dir: &Path, cwd: Option<&Path>, git_root: Option<&Path>) -> SkillScope {
-    // Home-level dirs (e.g. ~/.grok/, ~/.agents/, ~/.claude/) are User scope.
+    // Home-level dirs (e.g. ~/.grok/, ~/.agents/, ~/.claude/, ~/.codex/) are User scope.
     #[allow(deprecated)]
     if let Some(home) = std::env::home_dir()
         && dir.parent() == Some(home.as_path())
@@ -260,7 +264,7 @@ fn scope_for_config_dir(dir: &Path, cwd: Option<&Path>, git_root: Option<&Path>)
 /// Collect paths into `out`, deduplicating by canonical path.
 ///
 /// Skill/command discovery does **not** consult `.gitignore`. Auto-discovery
-/// only visits known config roots (`.grok`, `.agents`, `.claude`, `.cursor`),
+/// only visits known config roots (`.grok`, `.agents`, `.claude`, `.cursor`, `.codex`),
 /// which teams often gitignore as local-only config while still expecting them
 /// to load. Hiding a skill uses `[skills] ignore` in config, not repo ignore
 /// rules. AGENTS.md discovery still honors gitignore — that is content, not
@@ -2439,7 +2443,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         // Not a git repo → falls to the cwd-only branch (no upward walk).
-        for name in [".grok", ".agents", ".claude", ".cursor"] {
+        for name in [".grok", ".agents", ".claude", ".cursor", ".codex"] {
             fs::create_dir_all(cwd.join(name)).unwrap();
         }
 
@@ -2450,6 +2454,7 @@ mod tests {
             collect_skill_config_dirs(Some(cwd), None, tmp.path(), &[], CompatConfig::default());
         assert!(ends_with(&all, ".claude"), "claude missing: {all:?}");
         assert!(ends_with(&all, ".cursor"), "cursor missing: {all:?}");
+        assert!(ends_with(&all, ".codex"), "codex missing: {all:?}");
 
         // cursor.skills off → .cursor dropped, .claude kept.
         let mut compat = CompatConfig::default();
@@ -2460,6 +2465,7 @@ mod tests {
             "cursor must be gated off: {dirs:?}"
         );
         assert!(ends_with(&dirs, ".claude"), "claude must remain: {dirs:?}");
+        assert!(ends_with(&dirs, ".codex"), "codex must remain: {dirs:?}");
         assert!(ends_with(&dirs, ".grok"), "grok must remain: {dirs:?}");
     }
 

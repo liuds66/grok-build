@@ -299,14 +299,14 @@ pub(crate) struct UserInfo {
     pub(crate) subscription_tier: Option<String>,
 }
 
-/// Last 12 chars of a token string, safe for diagnostic logging.
-/// Uses the tail because JWT access tokens all share the same base64
-/// header prefix (`eyJ0eXAiOiJh…`); the tail (signature bytes) is
-/// unique per token and makes `key_changed` / `is_stale_snapshot`
-/// diagnostics meaningful.
-pub(crate) fn token_suffix(t: &str) -> &str {
-    let len = t.len();
-    if len > 12 { &t[len - 12..] } else { t }
+/// Redacted token marker used by diagnostic payloads.
+///
+/// Older builds emitted the last 12 characters of credentials. Even a
+/// suffix is sensitive, makes log retention risky, and is not needed for
+/// user-facing diagnostics. Keep this helper's call sites intact while
+/// ensuring every existing structured log is credential-free.
+pub(crate) fn token_suffix(_token: &str) -> &'static str {
+    "[REDACTED]"
 }
 
 /// Look up auth from the store by scope key.

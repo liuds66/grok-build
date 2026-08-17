@@ -3465,7 +3465,7 @@ fn render_footer(
                 HintItem::new(key!(Tab), "input"),
             ];
             ShortcutsBar::new(&hints)
-                .compact(4, Some(HintItem::new(help, "shortcuts")))
+                .compact(4, Some(HintItem::new(help, "快捷键")))
                 .render(inner, buf);
             return;
         }
@@ -3483,7 +3483,7 @@ fn render_footer(
                 HintItem::new(key!(Tab), "input"),
             ];
             ShortcutsBar::new(&hints)
-                .compact(4, Some(HintItem::new(help, "shortcuts")))
+                .compact(4, Some(HintItem::new(help, "快捷键")))
                 .render(inner, buf);
             return;
         }
@@ -3497,7 +3497,7 @@ fn render_footer(
             hints.push(HintItem::new(stop, stop_label).pinned());
         }
         ShortcutsBar::new(&hints)
-            .compact(4, Some(HintItem::new(help, "shortcuts")))
+            .compact(4, Some(HintItem::new(help, "快捷键")))
             .render(inner, buf);
         return;
     }
@@ -3528,7 +3528,7 @@ fn render_footer(
         key!('.', CONTROL),
     );
 
-    let help_hint = HintItem::new(help, "shortcuts");
+    let help_hint = HintItem::new(help, "快捷键");
 
     // Submit chord is `send_key` (Enter, or Shift/Alt+Enter in multiline).
     // Ctrl+S is send+open. Empty draft: create/open on the submit chord;
@@ -3671,7 +3671,7 @@ fn render_footer(
             vec![
                 HintItem::new(send_key, "send"),
                 HintItem::new(send_open, "send+open"),
-                HintItem::new(key!(BackTab), "mode"),
+                HintItem::new(key!(BackTab), "模式"),
             ]
         }
     } else if state.selected_idle_overflow {
@@ -3691,7 +3691,7 @@ fn render_footer(
             vec![
                 HintItem::new(send_key, "send"),
                 HintItem::new(send_open, "send+open"),
-                HintItem::new(key!(BackTab), "mode"),
+                HintItem::new(key!(BackTab), "模式"),
             ]
         }
     } else if button_focused {
@@ -3703,7 +3703,7 @@ fn render_footer(
             h.push(HintItem::new(send_key, "send"));
             h.push(HintItem::new(send_open, "send+open"));
         }
-        h.push(HintItem::new(key!(BackTab), "mode"));
+        h.push(HintItem::new(key!(BackTab), "模式"));
         h
     } else if row_selected {
         let mut h: Vec<HintItem> = vec![];
@@ -8640,8 +8640,8 @@ mod tests {
             "section + typed prompt footer must hint send / send+open, got: {content:?}",
         );
         assert!(
-            content.contains(":mode"),
-            "section + typed prompt footer must hint Shift+Tab:mode, got: {content:?}",
+            content.contains(":模式"),
+            "section + typed prompt footer must hint Shift+Tab:模式, got: {content:?}",
         );
         assert!(
             !content.contains(":collapse") && !content.contains(":expand"),

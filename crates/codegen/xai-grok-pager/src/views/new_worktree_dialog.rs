@@ -15,7 +15,7 @@ const MIN_DIALOG_WIDTH: u16 = 50;
 const DIALOG_HEIGHT: u16 = 5;
 /// Left/right padding inside the border (`inner_x = dialog.x + 2`).
 const INNER_PAD: u16 = 4;
-const LABEL_PREFIX: &str = "Name (optional): ";
+const LABEL_PREFIX: &str = "名称（可选）：";
 
 /// Render the new-worktree popup dialog centered on screen.
 ///
@@ -31,7 +31,7 @@ pub fn render_new_worktree_dialog(area: Rect, buf: &mut Buffer, state: &NewWorkt
         // knows the dialog is still active and can press Esc to dismiss.
         if area.height >= 1 && area.width >= 16 {
             let hint = Line::from(Span::styled(
-                "[Esc] to close",
+                "[Esc] 关闭",
                 Style::default().fg(theme.gray_dim),
             ));
             hint.render(Rect::new(area.x, area.y, area.width.min(16), 1), buf);
@@ -116,7 +116,7 @@ pub fn render_new_worktree_dialog(area: Rect, buf: &mut Buffer, state: &NewWorkt
 
     // Row 1: Title
     let title = Line::from(Span::styled(
-        "New Worktree",
+        "新建工作区",
         Style::default()
             .fg(theme.text_primary)
             .add_modifier(Modifier::BOLD),
@@ -143,19 +143,19 @@ pub fn render_new_worktree_dialog(area: Rect, buf: &mut Buffer, state: &NewWorkt
     // Row 3: Hints
     let hints = Line::from(vec![
         Span::styled(
-            "enter",
+            "回车",
             Style::default()
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" = create   ", Style::default().fg(theme.gray)),
+        Span::styled(" = 创建   ", Style::default().fg(theme.gray)),
         Span::styled(
-            "esc",
+            "Esc",
             Style::default()
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" = cancel", Style::default().fg(theme.gray)),
+        Span::styled(" = 取消", Style::default().fg(theme.gray)),
     ]);
     hints.render(Rect::new(inner_x, dialog.y + 3, inner_width, 1), buf);
 }
@@ -229,7 +229,7 @@ mod tests {
             text.contains(label),
             "full long name must be visible on a wide terminal:\n{text}"
         );
-        assert!(text.contains("New Worktree"), "title missing:\n{text}");
+        assert!(text.contains("新建工作区"), "title missing:\n{text}");
     }
 
     #[test]

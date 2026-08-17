@@ -347,7 +347,7 @@ final class TopBarView: LayerView {
         coreLeaf.contentTintColor = Palette.accent
         let coreTitle = label("AI Dev One Core", size: 12.5, weight: .medium)
         coreTitle.translatesAutoresizingMaskIntoConstraints = false
-        let coreVersion = label("v0.3", size: 11, color: Palette.secondaryText)
+        let coreVersion = label("v0.4.0-beta.1", size: 11, color: Palette.secondaryText)
         coreVersion.translatesAutoresizingMaskIntoConstraints = false
         let localDot = label("● Local Agent", size: 10.5, color: Palette.success)
         localDot.translatesAutoresizingMaskIntoConstraints = false
@@ -467,7 +467,7 @@ final class BottomStatusBarView: LayerView {
     init() {
         super.init(fillColor: Palette.sidebar.withAlphaComponent(0.7), cornerRadius: 0, strokeColor: Palette.border)
         translatesAutoresizingMaskIntoConstraints = false
-        let version = label("◈  AI Dev One Core v0.3.0", size: 11, color: Palette.secondaryText)
+        let version = label("◈  AI Dev One Core v0.4.0-beta.1", size: 11, color: Palette.secondaryText)
         let local = capsule("●  本地模式", color: Palette.success)
         let monitor = capsule("⌁  性能监控", color: Palette.accent)
         [restartCoreButton, viewCoreLogButton].forEach { button in
@@ -3973,8 +3973,9 @@ final class SettingsWindowController: NSWindowController {
 
 /// 三栏工作区的原生 AppKit 分栏容器。
 ///
-/// 这里使用 NSSplitView 自带的拖拽机制，而不是把尺寸锁死在约束上：
-/// 这样鼠标移动很快、离开面板或窗口尺寸变化时，系统仍能持续交付拖拽事件。
+/// 这里使用 NSSplitView 承载三栏和分隔线绘制，但由本类接管分隔线拖拽：
+/// 面板使用手动 frame 布局时，原生 tracking loop 不会稳定交付 resize 回调，
+/// 所以事件在本类内以固定 drag origin 计算并在 mouseUp 时持久化。
 /// 两侧尺寸写入 UserDefaults，效果等价于 Web Renderer 中的 localStorage。
 final class ResizableSplitView: NSSplitView, NSSplitViewDelegate {
     static let sidebarStorageKey = "ai-dev-one.sidebar-width"
@@ -3994,7 +3995,19 @@ final class ResizableSplitView: NSSplitView, NSSplitViewDelegate {
     private var didRestoreInitialWidths = false
     private var hoveredDivider: Int?
     private var draggingDivider: Int?
+    private var dragStartX: CGFloat?
+    private var dragStartSidebarWidth: CGFloat?
+    private var dragStartWorkspaceWidth: CGFloat?
     private var dividerTrackingAreas: [NSTrackingArea] = []
+
+    private var resizeDiagnosticsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "ai-dev-one.resizable-diagnostics")
+    }
+
+    private func resizeDiagnostic(_ message: String) {
+        guard resizeDiagnosticsEnabled else { return }
+        NSLog("[Resizable] %@", message)
+    }
 
     override init(frame frameRect: NSRect) {
         let defaults = UserDefaults.standard
@@ -4061,6 +4074,16 @@ final class ResizableSplitView: NSSplitView, NSSplitViewDelegate {
         updateTrackingAreasForDividers()
     }
 
+    /// Divider hit testing must win over the pane views themselves.  The
+    /// visible divider is one pixel wide, but the interactive target is ten
+    /// pixels wide so a normal mouse can reliably start a drag.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if dividerIndex(at: point.x) != nil {
+            return self
+        }
+        return super.hitTest(point)
+    }
+
     override func drawDivider(in rect: NSRect) {
         let index = dividerIndex(at: rect.midX)
         let alpha: CGFloat
@@ -4090,7 +4113,7 @@ final class ResizableSplitView: NSSplitView, NSSplitViewDelegate {
     override func resetCursorRects() {
         super.resetCursorRects()
         for index in 0..<max(0, subviews.count - 1) {
-            let rect = dividerFrame(at: index).insetBy(dx: -2, dy: 0)
+            let rect = dividerFrame(at: index).insetBy(dx: -5, dy: 0)
             addCursorRect(rect, cursor: .resizeLeftRight)
         }
     }
@@ -4098,16 +4121,84 @@ final class ResizableSplitView: NSSplitView, NSSplitViewDelegate {
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let index = dividerIndex(at: point.x)
-        if event.clickCount >= 2, let index {
+        guard let index else {
+            super.mouseDown(with: event)
+            return
+        }
+        if event.clickCount >= 2 {
             resetDivider(index)
             return
         }
+
+        // Do not delegate to NSSplitView's internal tracking loop.  The
+        // panes are laid out manually (arrangesAllSubviews=false), so the
+        // native divider loop receives the down event but does not emit a
+        // usable resize callback.  Keep one immutable drag origin and route
+        // subsequent mouseDragged/mouseUp events through this view instead.
         draggingDivider = index
+        dragStartX = point.x
+        dragStartSidebarWidth = sidebarWidth
+        dragStartWorkspaceWidth = workspaceWidth
+        resizeDiagnostic(
+            "divider=\(index) mouseDown startX=\(point.x) "
+                + "startSidebar=\(sidebarWidth) startWorkspace=\(workspaceWidth)"
+        )
         needsDisplay = true
-        super.mouseDown(with: event)
-        draggingDivider = nil
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let index = draggingDivider,
+              let startX = dragStartX,
+              let startSidebar = dragStartSidebarWidth,
+              let startWorkspace = dragStartWorkspaceWidth else {
+            super.mouseDragged(with: event)
+            return
+        }
+
+        let currentX = convert(event.locationInWindow, from: nil).x
+        let translation = currentX - startX
+        if index == 0 {
+            let maximum = min(
+                sidebarMaximumWidth,
+                bounds.width - startWorkspace - chatMinimumWidth - dividerThickness * 2
+            )
+            let candidate = startSidebar + translation
+            sidebarWidth = clamp(candidate, sidebarMinimumWidth, max(sidebarMinimumWidth, maximum))
+        } else {
+            let maximum = min(
+                workspaceMaximumWidth,
+                bounds.width - startSidebar - chatMinimumWidth - dividerThickness * 2
+            )
+            let candidate = startWorkspace - translation
+            workspaceWidth = clamp(candidate, workspaceMinimumWidth, max(workspaceMinimumWidth, maximum))
+        }
+
+        setPaneFrames(sidebarWidth: sidebarWidth, workspaceWidth: workspaceWidth)
+        resizeDiagnostic(
+            "divider=\(index) dragChanged currentX=\(currentX) translation=\(translation) "
+                + "newSidebar=\(sidebarWidth) newWorkspace=\(workspaceWidth)"
+        )
         needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let index = draggingDivider else {
+            super.mouseUp(with: event)
+            return
+        }
+
+        // Apply one final sample so a short drag that only produces a mouseUp
+        // still lands at the pointer's final position.
+        mouseDragged(with: event)
         persistCurrentWidths()
+        resizeDiagnostic(
+            "divider=\(index) dragEnded sidebar=\(sidebarWidth) workspace=\(workspaceWidth)"
+        )
+        draggingDivider = nil
+        dragStartX = nil
+        dragStartSidebarWidth = nil
+        dragStartWorkspaceWidth = nil
+        needsDisplay = true
     }
 
     func splitView(
@@ -4116,8 +4207,8 @@ final class ResizableSplitView: NSSplitView, NSSplitViewDelegate {
         forDrawnRect drawnRect: NSRect,
         ofDividerAt dividerIndex: Int
     ) -> NSRect {
-        // 视觉线保持 1px，但命中区域为 5px，方便精确拖拽。
-        proposedEffectiveRect.insetBy(dx: -2, dy: 0)
+        // 视觉线保持 1px，但命中区域为 10px，方便精确拖拽。
+        proposedEffectiveRect.insetBy(dx: -5, dy: 0)
     }
 
     func splitView(
@@ -4125,7 +4216,7 @@ final class ResizableSplitView: NSSplitView, NSSplitViewDelegate {
         additionalEffectiveRectOfDividerAt dividerIndex: Int
     ) -> NSRect {
         let rect = dividerFrame(at: dividerIndex)
-        return rect.insetBy(dx: -2, dy: 0)
+        return rect.insetBy(dx: -5, dy: 0)
     }
 
     func splitView(
@@ -4262,7 +4353,7 @@ final class ResizableSplitView: NSSplitView, NSSplitViewDelegate {
         dividerTrackingAreas.forEach(removeTrackingArea)
         dividerTrackingAreas.removeAll(keepingCapacity: true)
         for index in 0..<max(0, subviews.count - 1) {
-            let rect = dividerFrame(at: index).insetBy(dx: -3, dy: 0)
+            let rect = dividerFrame(at: index).insetBy(dx: -5, dy: 0)
             guard !rect.isEmpty else { continue }
             let area = NSTrackingArea(
                 rect: rect,
@@ -4287,7 +4378,7 @@ final class ResizableSplitView: NSSplitView, NSSplitViewDelegate {
 
     private func dividerIndex(at x: CGFloat) -> Int? {
         for index in 0..<max(0, subviews.count - 1) {
-            let rect = dividerFrame(at: index).insetBy(dx: -4, dy: 0)
+            let rect = dividerFrame(at: index).insetBy(dx: -5, dy: 0)
             if rect.minX...rect.maxX ~= x { return index }
         }
         return nil
@@ -5488,6 +5579,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let isPointerResize = sender.inLiveResize && (NSEvent.pressedMouseButtons & 1) == 1
         if isPointerResize {
             userIsResizingWindow = true
+            updatePreferredWindowSize(safeSize)
+            return safeSize
+        }
+        // AppKit calls this delegate while toggling the standard zoom frame.
+        // During the return trip `isZoomed` is still true, so returning the
+        // previously stored (maximized) preferred size would reject the
+        // restore operation.  Keep the minimum-size guard, but accept the
+        // valid restore frame instead of feeding the zoomed size back.
+        if sender.isZoomed {
             updatePreferredWindowSize(safeSize)
             return safeSize
         }

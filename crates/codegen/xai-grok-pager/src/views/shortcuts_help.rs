@@ -2195,7 +2195,7 @@ mod tests {
             entries
                 .iter()
                 .find_map(|e| match e {
-                    ShortcutsHelpEntry::Hint { item, .. } if item.label == "shortcuts" => {
+                    ShortcutsHelpEntry::Hint { item, .. } if item.label == "快捷键" => {
                         Some(item.keys.clone())
                     }
                     _ => None,

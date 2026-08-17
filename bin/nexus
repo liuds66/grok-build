@@ -1,0 +1,498 @@
+#!/usr/bin/env bash
+# Nexus command surface. The runtime uses GROK_* compatibility variables
+# internally; users only need to manage NEXUS_HOME and provider credentials.
+set -euo pipefail
+
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "${script_path}" ]]; do
+  link_dir="$(cd -P -- "$(dirname -- "${script_path}")" && pwd)"
+  script_path="$(readlink "${script_path}")"
+  if [[ "${script_path}" != /* ]]; then
+    script_path="${link_dir}/${script_path}"
+  fi
+done
+script_dir="$(cd -P -- "$(dirname -- "${script_path}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd)"
+nexus_home="${NEXUS_HOME:-${HOME}/.nexus}"
+config_file="${nexus_home}/config.toml"
+build_target_dir="${NEXUS_BUILD_TARGET_DIR:-${HOME}/.cache/nexus/target}"
+chinese_reply_rule="默认使用简体中文与用户沟通。代码、命令、路径、标识符及用户明确要求保留原样。"
+
+print_help() {
+  cat <<'EOF'
+Nexus — 本地优先的中文编码代理
+
+用法：
+  nexus                         启动交互式编码会话
+  nexus run [运行时参数]         运行代理（支持 -p 无界面模式）
+  nexus plan <任务>              以只读模式先生成实施计划
+  nexus review [说明]            只读审查当前仓库，不修改文件
+  nexus resume [会话 ID]         恢复最近一次或指定的 Nexus 会话
+  nexus init [预设]              从预设创建 ~/.nexus/config.toml
+  nexus settings [命令]          查看或设置模型密钥与本地配置
+  nexus config                  输出当前配置文件路径
+  nexus build                   构建 target/release/nexus-agent
+
+预设：openai、anthropic、openrouter、ollama
+
+示例：
+  nexus init openai
+  nexus settings set-key openai  # 安全保存 OpenAI API Key
+  nexus plan "拆分计费服务，先给出实施计划"
+  nexus run -p "运行测试并修复失败" --output-format json
+  nexus review "重点检查安全问题和缺失的测试"
+
+运行时参数会原样透传。常用安全选项包括：
+--sandbox workspace（默认）、--sandbox read-only、--sandbox strict。
+EOF
+}
+
+print_settings_help() {
+  cat <<'EOF'
+Nexus 设置中心
+
+用法：
+  nexus settings                         查看本地设置状态（不显示密钥）
+  nexus settings set-key <提供商> [密钥]  保存模型 API Key；不传密钥时安全地交互输入
+  nexus settings clear-key <提供商>       从配置中删除已保存的 API Key
+  nexus settings path                    输出配置文件路径
+
+支持的提供商：openai、anthropic、openrouter。
+
+示例：
+  nexus init openai
+  nexus settings set-key openai
+  nexus settings clear-key openai
+
+密钥写入 ~/.nexus/config.toml 的对应模型设置，文件权限为 600。Nexus 不会在
+状态输出、日志或帮助中回显密钥。环境变量（如 OPENAI_API_KEY）仍可作为备用方式。
+EOF
+}
+
+prepare_runtime() {
+  mkdir -p "${nexus_home}"
+  chmod 700 "${nexus_home}"
+
+  # The upstream runtime is deliberately isolated inside the Nexus state home.
+  export GROK_HOME="${nexus_home}"
+  export GROK_DISABLE_AUTOUPDATER="${GROK_DISABLE_AUTOUPDATER:-1}"
+  export GROK_TELEMETRY_ENABLED="${GROK_TELEMETRY_ENABLED:-0}"
+  export GROK_TELEMETRY_TRACE_UPLOAD="${GROK_TELEMETRY_TRACE_UPLOAD:-0}"
+  export DISABLE_TELEMETRY="${DISABLE_TELEMETRY:-1}"
+}
+
+run_agent() {
+  prepare_runtime
+
+  if [[ ! -f "${config_file}" && "${NEXUS_SKIP_CONFIG_CHECK:-0}" != "1" ]]; then
+    echo "未找到 Nexus 模型配置：${config_file}" >&2
+    echo "请运行：nexus init openai（或 anthropic、openrouter、ollama）" >&2
+    exit 2
+  fi
+
+  localize_legacy_model_labels
+
+  if [[ "${NEXUS_SKIP_CONFIG_CHECK:-0}" != "1" ]]; then
+    ensure_default_provider_credential || exit $?
+  fi
+
+  if [[ -n "${NEXUS_BIN:-}" ]]; then
+    exec "${NEXUS_BIN}" "$@"
+  fi
+
+  if [[ -x "${build_target_dir}/release/nexus-agent" ]]; then
+    exec "${build_target_dir}/release/nexus-agent" "$@"
+  fi
+
+  # Legacy location from an explicit local Cargo invocation.
+  if [[ -x "${repo_root}/target/release/nexus-agent" ]]; then
+    exec "${repo_root}/target/release/nexus-agent" "$@"
+  fi
+
+  if command -v cargo >/dev/null 2>&1; then
+    exec env CARGO_TARGET_DIR="${build_target_dir}" \
+      cargo run -p xai-grok-pager-bin --bin nexus-agent -- "$@"
+  fi
+
+  echo "Nexus 尚未构建，且系统中没有可用的 Rust。" >&2
+  echo "请运行一键安装：${repo_root}/install.sh" >&2
+  exit 127
+}
+
+run_localized_agent() {
+  if [[ "${NEXUS_LANGUAGE:-zh-CN}" != "zh-CN" ]]; then
+    run_agent "$@"
+    return
+  fi
+
+  local argument
+  for argument in "$@"; do
+    case "${argument}" in
+      --rules|--rules=*|--append-system-prompt|--append-system-prompt=*)
+        run_agent "$@"
+        return
+        ;;
+    esac
+  done
+  run_agent --rules "${chinese_reply_rule}" "$@"
+}
+
+run_with_default_sandbox() {
+  local default_sandbox="$1"
+  shift
+  local argument
+  for argument in "$@"; do
+    case "${argument}" in
+      --sandbox|--sandbox=*)
+        run_localized_agent "$@"
+        return
+        ;;
+    esac
+  done
+  run_localized_agent --sandbox "${default_sandbox}" "$@"
+}
+
+init_config() {
+  local preset="${1:-openai}"
+  local source_file="${repo_root}/config/presets/${preset}.toml"
+
+  if [[ ! -f "${source_file}" ]]; then
+    echo "未知预设：${preset}。可选：openai、anthropic、openrouter、ollama。" >&2
+    exit 2
+  fi
+  if [[ -e "${config_file}" ]]; then
+    echo "为保护已有配置，未覆盖：${config_file}" >&2
+    echo "请直接编辑它、明确删除后重建，或设置 NEXUS_HOME 创建另一个配置。" >&2
+    exit 1
+  fi
+
+  mkdir -p "${nexus_home}"
+  chmod 700 "${nexus_home}"
+  cp "${source_file}" "${config_file}"
+  chmod 600 "${config_file}"
+  echo "已从 ${preset} 预设创建配置：${config_file}"
+  if [[ "${preset}" == "ollama" ]]; then
+    echo "Ollama 通常不需要 API Key；启动本地服务后直接运行 nexus 即可。"
+  else
+    echo "可运行：nexus settings set-key ${preset}，将密钥安全保存到本地设置中。"
+  fi
+}
+
+model_table_for_provider() {
+  case "$1" in
+    openai) printf '%s\n' 'openai-coding' ;;
+    anthropic) printf '%s\n' 'anthropic-coding' ;;
+    openrouter) printf '%s\n' 'openrouter-coding' ;;
+    ollama)
+      echo "Ollama 使用本地服务，通常不需要 API Key。" >&2
+      return 2
+      ;;
+    *)
+      echo "未知提供商：$1。可选：openai、anthropic、openrouter。" >&2
+      return 2
+      ;;
+  esac
+}
+
+require_config() {
+  if [[ ! -f "${config_file}" ]]; then
+    echo "尚未创建模型配置：${config_file}" >&2
+    echo "请先运行：nexus init openai" >&2
+    return 2
+  fi
+}
+
+validate_api_key() {
+  local value="$1"
+  if [[ -z "${value}" || "${value}" == *$'\n'* || "${value}" == *$'\r'* \
+    || "${value}" == *'"'* || "${value}" == *'\\'* ]]; then
+    echo "密钥不能为空，且不能包含换行、双引号或反斜杠。" >&2
+    return 2
+  fi
+}
+
+config_has_api_key() {
+  local model_table="$1"
+  awk -v section="[model.${model_table}]" '
+    $0 == section { inside = 1; next }
+    /^\[/ { inside = 0 }
+    inside && /^[[:space:]]*api_key[[:space:]]*=/ { found = 1 }
+    END { exit !found }
+  ' "${config_file}"
+}
+
+default_model_id() {
+  awk '
+    /^\[models\]/ { inside = 1; next }
+    /^\[/ { inside = 0 }
+    inside && /^[[:space:]]*default[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*"/, "", value)
+      sub(/".*$/, "", value)
+      print value
+      exit
+    }
+  ' "${config_file}"
+}
+
+# Older Nexus configurations were created before the Chinese presets existed.
+# Keep a user's API key and every other setting untouched; only replace the
+# original English display labels so the current model name in the TUI is Chinese.
+localize_legacy_model_labels() {
+  [[ -f "${config_file}" ]] || return 0
+
+  local temp_file
+  temp_file="$(mktemp "${config_file}.tmp.XXXXXX")"
+  awk '
+    /^\[model\.openai-coding\]/ { model = "openai"; print; next }
+    /^\[model\.anthropic-coding\]/ { model = "anthropic"; print; next }
+    /^\[model\.openrouter-coding\]/ { model = "openrouter"; print; next }
+    /^\[model\.ollama-coding\]/ { model = "ollama"; print; next }
+    /^\[/ { model = "" }
+    model == "openai" && $0 == "name = \"OpenAI coding model\"" {
+      print "name = \"OpenAI 编码模型\""; next
+    }
+    model == "openai" && $0 == "description = \"OpenAI Responses API via your own API key\"" {
+      print "description = \"使用你自己的 API Key 访问 OpenAI Responses API\""; next
+    }
+    model == "anthropic" && $0 == "name = \"Anthropic coding model\"" {
+      print "name = \"Anthropic 编码模型\""; next
+    }
+    model == "openrouter" && $0 == "name = \"OpenRouter coding model\"" {
+      print "name = \"OpenRouter 编码模型\""; next
+    }
+    model == "ollama" && $0 == "name = \"Local Ollama coding model\"" {
+      print "name = \"本地 Ollama 编码模型\""; next
+    }
+    { print }
+  ' "${config_file}" > "${temp_file}"
+
+  if cmp -s "${config_file}" "${temp_file}"; then
+    rm -f "${temp_file}"
+    return 0
+  fi
+
+  chmod 600 "${temp_file}"
+  mv "${temp_file}" "${config_file}"
+}
+
+ensure_default_provider_credential() {
+  local model_id
+  local provider
+  local environment_key
+  model_id="$(default_model_id)"
+  case "${model_id}" in
+    openai-coding)
+      provider="openai"
+      environment_key="OPENAI_API_KEY"
+      ;;
+    anthropic-coding)
+      provider="anthropic"
+      environment_key="ANTHROPIC_API_KEY"
+      ;;
+    openrouter-coding)
+      provider="openrouter"
+      environment_key="OPENROUTER_API_KEY"
+      ;;
+    ""|ollama-coding)
+      return 0
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if config_has_api_key "${model_id}" || [[ -n "${!environment_key:-}" ]]; then
+    return 0
+  fi
+
+  echo "当前默认模型为 ${provider}，但尚未设置 API 密钥。" >&2
+  echo "为避免进入上游英文登录页，Nexus 已停止启动。" >&2
+  echo "请运行：nexus settings set-key ${provider}" >&2
+  echo "也可临时设置：export ${environment_key}=\"你的密钥\"" >&2
+  return 2
+}
+
+write_api_key() {
+  local model_table="$1"
+  local api_key="$2"
+  local temp_file
+  temp_file="$(mktemp "${config_file}.tmp.XXXXXX")"
+
+  if ! awk -v section="[model.${model_table}]" -v key="${api_key}" '
+    BEGIN { replacement = "api_key = \"" key "\"" }
+    $0 == section {
+      if (inside && !written) print replacement
+      inside = 1
+      seen = 1
+      print
+      next
+    }
+    /^\[/ {
+      if (inside && !written) print replacement
+      inside = 0
+      print
+      next
+    }
+    inside && /^[[:space:]]*api_key[[:space:]]*=/ {
+      print replacement
+      written = 1
+      next
+    }
+    { print }
+    END {
+      if (inside && !written) print replacement
+      if (!seen) exit 3
+    }
+  ' "${config_file}" > "${temp_file}"; then
+    rm -f "${temp_file}"
+    echo "未找到模型设置 [model.${model_table}]，未写入密钥。" >&2
+    return 2
+  fi
+
+  chmod 600 "${temp_file}"
+  mv "${temp_file}" "${config_file}"
+}
+
+clear_api_key() {
+  local model_table="$1"
+  local temp_file
+  temp_file="$(mktemp "${config_file}.tmp.XXXXXX")"
+
+  if ! awk -v section="[model.${model_table}]" '
+    $0 == section { inside = 1; seen = 1; print; next }
+    /^\[/ { inside = 0 }
+    inside && /^[[:space:]]*api_key[[:space:]]*=/ { removed = 1; next }
+    { print }
+    END { if (!seen) exit 3 }
+  ' "${config_file}" > "${temp_file}"; then
+    rm -f "${temp_file}"
+    echo "未找到模型设置 [model.${model_table}]。" >&2
+    return 2
+  fi
+
+  chmod 600 "${temp_file}"
+  mv "${temp_file}" "${config_file}"
+}
+
+settings_status() {
+  prepare_runtime
+  echo "Nexus 设置中心"
+  echo "配置文件：${config_file}"
+  if [[ ! -f "${config_file}" ]]; then
+    echo "模型配置：未创建（运行 nexus init openai）"
+    return
+  fi
+  local provider
+  local model_table
+  for provider in openai anthropic openrouter; do
+    model_table="$(model_table_for_provider "${provider}")"
+    if config_has_api_key "${model_table}"; then
+      echo "${provider} API Key：已保存"
+    else
+      echo "${provider} API Key：未保存"
+    fi
+  done
+  echo "提示：运行 nexus settings set-key openai 进行设置。"
+}
+
+settings_set_key() {
+  local provider="${1:-}"
+  local supplied_key="${2:-}"
+  local model_table
+  require_config
+  model_table="$(model_table_for_provider "${provider}")"
+  if [[ -z "${supplied_key}" ]]; then
+    read -r -s -p "请输入 ${provider} API Key（输入内容不会显示）：" supplied_key
+    printf '\n'
+  fi
+  validate_api_key "${supplied_key}"
+  write_api_key "${model_table}" "${supplied_key}"
+  echo "已保存 ${provider} API Key 到本地设置。"
+}
+
+settings_clear_key() {
+  local provider="${1:-}"
+  local model_table
+  require_config
+  model_table="$(model_table_for_provider "${provider}")"
+  clear_api_key "${model_table}"
+  echo "已删除 ${provider} API Key。"
+}
+
+settings_command() {
+  shift
+  case "${1:-}" in
+    "")
+      settings_status
+      ;;
+    path)
+      echo "${config_file}"
+      ;;
+    set-key)
+      settings_set_key "${2:-}" "${3:-}"
+      ;;
+    clear-key)
+      settings_clear_key "${2:-}"
+      ;;
+    help|-h|--help)
+      print_settings_help
+      ;;
+    *)
+      echo "未知设置命令：$1" >&2
+      print_settings_help >&2
+      return 2
+      ;;
+  esac
+}
+
+command="${1:-}"
+case "${command}" in
+  ""|run)
+    if [[ "${command}" == "run" ]]; then shift; fi
+    run_with_default_sandbox "${NEXUS_SANDBOX:-workspace}" "$@"
+    ;;
+  plan)
+    shift
+    if [[ "$#" -eq 0 ]]; then
+      echo "用法：nexus plan <任务>" >&2
+      exit 2
+    fi
+    run_localized_agent --sandbox "${NEXUS_SANDBOX:-workspace}" --permission-mode plan "$*"
+    ;;
+  review)
+    shift
+    review_prompt="${*:-审查当前未提交的改动。找出正确性、安全性和测试覆盖缺口。不要编辑文件。}"
+    run_localized_agent --sandbox read-only --permission-mode plan "${review_prompt}"
+    ;;
+  resume)
+    shift
+    if [[ "$#" -eq 0 ]]; then
+      run_localized_agent --sandbox "${NEXUS_SANDBOX:-workspace}" --resume
+    else
+      run_localized_agent --sandbox "${NEXUS_SANDBOX:-workspace}" --resume "$1"
+    fi
+    ;;
+  init)
+    shift
+    init_config "${1:-openai}"
+    ;;
+  settings)
+    settings_command "$@"
+    ;;
+  build)
+    exec "${repo_root}/scripts/build-nexus"
+    ;;
+  config)
+    echo "${config_file}"
+    ;;
+  help|-h|--help)
+    print_help
+    ;;
+  --version|-V)
+    NEXUS_SKIP_CONFIG_CHECK=1 run_agent "${command}"
+    ;;
+  *)
+    run_with_default_sandbox "${NEXUS_SANDBOX:-workspace}" "$@"
+    ;;
+esac

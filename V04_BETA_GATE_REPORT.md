@@ -1,4 +1,4 @@
-# AI Dev One Route 2 v0.4 Beta Final Gate
+# AI Dev One Route 2 v0.4.0-beta.1 Beta Final Gate
 
 > 本文件记录 v0.4 Beta Final Gate 的真实证据。`BLOCKED` 表示尚未具备现场条件或命令仍在执行，不等同于 PASS。
 
@@ -8,7 +8,9 @@
 |---|---|
 | Repository root | `/Volumes/AI-DEV/Nexus项目/源代码/grok Build底座` |
 | Branch | `codex/nexus-agent` |
-| Git commit SHA（未提交工作树基线） | `a5727c5960452e7527a154b25cb5bf00cda0545e` |
+| 旧 RC Git commit SHA | `97893182ec30684c5d4b1c5ed55daa1d4be4d88f` |
+| 最终 Beta baseline SHA | 以本地 annotated tag `v0.4.0-beta.1` 指向的提交为准 |
+| 版本 | `0.4.0-beta.1` |
 | App source | `apps/nexus-desktop/Sources/NexusDesktop` |
 | Rust workspace | `Cargo.toml` |
 | Installed app | `/Volumes/AI-DEV/Nexus项目/应用/Nexus.app` |
@@ -36,8 +38,8 @@ CARGO_TARGET_DIR=/Users/mac/AI-Dev-One-Build/target
 |---|---|---|---|---|
 | Rust 修改 crate doctest | 同版本、本地磁盘、无混用 | `xai_grok_shell`：5 项，0 passed、0 failed、5 ignored；退出码 0 | PASS | `/tmp/ai-dev-one-local-shell-doctest-final.log` |
 | Rust workspace doctest | `cargo test --doc --workspace` 完成且无失败 | 同一安装器 toolchain、本地 target；80 个 `test result:` 块全部为 `ok`，未发现 `FAILED`、`error:` 或 failed result | PASS | `/tmp/ai-dev-one-local-workspace-doctest-final.log` |
-| Resizable 人工验收 | 220↔420、280↔620、快速拖动、双击重置 | 双击恢复与窗口下限 PASS；真实拖动/最大化未完成 | BLOCKED | `MANUAL_UI_ACCEPTANCE.md` |
-| Core Restart 按钮人工验收 | kill→UI disconnected/restarting→按钮恢复 | 已真实 kill 两次；未自动恢复，安装包未找到 Restart 按钮 | FAIL | `MANUAL_UI_ACCEPTANCE.md`、`FULL_E2E_REPORT.md` |
+| Resizable 人工验收 | 220↔420、280↔620、快速拖动、双击重置 | RC3 安装包真实拖动 120 次；边界、最大化/恢复、持久化均通过 | PASS | `RC3_RESIZABLE_REPORT.md`、`MANUAL_UI_ACCEPTANCE.md` |
+| Core Restart 按钮人工验收 | kill→UI disconnected/restarting→按钮恢复 | RC2 安装包已真实 kill、自动恢复和 Restart 按钮验收通过 | PASS | `RC2_CORE_RECOVERY_REPORT.md`、`MANUAL_UI_ACCEPTANCE.md` |
 | DeepSeek title warning | title request 不发送 tools/tool_choice | Rust 回归 28/28 PASS；请求构造断言 tools 为空、tool_choice=None | PASS | `/tmp/ai-dev-one-session-title-test.log` |
 | CJS 回归 | 18/18 | 18 PASS，0 FAIL | PASS | `/tmp/ai-dev-one-cjs-beta-final.log` |
 | Secret scan | 不出现 key/Bearer/header | runtime JSONL 与本轮最终日志的 credential-shaped 文件数均为 0 | PASS | `/tmp/ai-dev-one-cjs-beta-final.log`、最终日志扫描输出 |
@@ -51,7 +53,7 @@ CARGO_TARGET_DIR=/Users/mac/AI-Dev-One-Build/target
 
 ## 人工现场记录
 
-详细步骤和不可伪造的阻塞条件见 [`MANUAL_UI_ACCEPTANCE.md`](MANUAL_UI_ACCEPTANCE.md)。在授予 macOS Accessibility 后，需把 Resizable 与 Core Restart 的 `MANUAL BLOCKED` 行改为真实 `PASS` 或 `FAIL`，再进行 Beta 决策。
+详细现场证据见 [`MANUAL_UI_ACCEPTANCE.md`](MANUAL_UI_ACCEPTANCE.md) 与 [`RC3_RESIZABLE_REPORT.md`](RC3_RESIZABLE_REPORT.md)。Resizable 和 Core Restart 均已在安装包上完成真实验收。
 
 ## Beta 决策规则
 
@@ -60,7 +62,7 @@ CARGO_TARGET_DIR=/Users/mac/AI-Dev-One-Build/target
 ## 当前优先级计数（最终人工验收前）
 
 - P0：0
-- P1：2（Resizable 拖动/最大化现场尚未完成；Core Restart 真实 kill 场景失败且安装包未暴露 Restart 按钮）
+- P1：0（Resizable 与 Core Restart 现场项均已关闭）
 - P2：0（DeepSeek 标题请求已移除 tools/tool_choice，并由 28/28 回归测试覆盖）
 - P3：0
 
@@ -73,14 +75,14 @@ CARGO_TARGET_DIR=/Users/mac/AI-Dev-One-Build/target
 
 ## Final gate decision
 
-最终 release build、签名安装、LaunchServices 冷启动、Rust workspace doctest、CJS 回归和 Secret scan 均已完成且通过。后续已取得 macOS Accessibility 并进行了真实现场复核：Resizable 拖动/最大化仍未完成，Core Restart 在真实 kill 场景下失败且未找到按钮，故不能把 P1 清零：本版本应标为 **Release Candidate（RC）**，暂不正式标记 `AI Dev One Route 2 v0.4 Beta`。
+最终 release build、签名安装、LaunchServices 冷启动、Rust workspace doctest、CJS 回归和 Secret scan 均已完成且通过。RC2 Core 生命周期与 RC3 Resizable 真实安装包验收均通过，P1 已清零；本版本达到 **AI Dev One Route 2 v0.4 Beta** 的功能 Gate。
 
 - P0 remaining：0
-- P1 remaining：2（两项仅限现场 Accessibility 的人工验收；没有新增代码失败）
+- P1 remaining：0
 - P2 remaining：0
 - P3 remaining：0
 
-## RC2 Core 生命周期修复（2026-08-17）
+## RC2 Core 生命周期修复（2026-08-17；历史记录）
 
 此前记录的“Core kill 后无恢复、无 Restart 按钮”已在 RC2 安装包中复现、修复并重新验收；旧记录保留作为历史证据，不再代表当前构建状态。详细记录见 [`RC2_CORE_RECOVERY_REPORT.md`](RC2_CORE_RECOVERY_REPORT.md)。
 
@@ -92,9 +94,9 @@ CARGO_TARGET_DIR=/Users/mac/AI-Dev-One-Build/target
 | Restart 入口 | 失败态 AX/UI 实际显示“重新启动 Core”“查看日志”，按钮可 AXPress | PASS |
 | 手动重启 | 点击 Restart 后 `manual restart requested → ready`，单一健康检查 PID；之后新任务完成 | PASS |
 | 正常退出 | `shutdown()` 设置 `manualShutdown`，不会由 termination handler 自动拉起 Core | PASS（合同/退出回归） |
-| Resizable 真实鼠标 | 本轮未改代码；拖动 30 次与最大化/恢复仍需用户桌面验收 | BLOCKED |
+| Resizable 真实鼠标 | RC3 安装包真实拖动 120 次，边界与最大化/恢复通过 | PASS |
 
-### RC2 当前优先级
+### RC2 当前优先级（历史快照，已由 RC3 覆盖）
 
 - P0 remaining：0
 - P1 remaining：1（仅 Resizable 真实拖动/最大化人工验收）
@@ -103,7 +105,7 @@ CARGO_TARGET_DIR=/Users/mac/AI-Dev-One-Build/target
 
 当前仍为 **Release Candidate**，本轮不创建 Beta tag。`RC2_CORE_RECOVERY_REPORT.md` 同时记录统一 Rust 1.97.1 toolchain 的 `cargo test -p xai-grok-pager-bin`：62 tests、0 failed，以及 CJS 19/19、桌面烟测 66/0、Secret scan PASS。
 
-## 真实现场复核（2026-08-17）
+## 真实现场复核（2026-08-17；修复前历史记录）
 
 本机随后已授予 Accessibility（`AX_TRUSTED=true`），并对安装后的 `/Volumes/AI-DEV/Nexus项目/应用/Nexus.app` 做了真实操作尝试，结果覆盖并更新此前的“未授权 BLOCKED”说明：
 
@@ -118,4 +120,8 @@ CARGO_TARGET_DIR=/Users/mac/AI-Dev-One-Build/target
 | Restart 按钮 | FAIL；安装包 AX/UI 中未找到“重新启动 Core”按钮 | `MANUAL_UI_ACCEPTANCE.md` |
 | kill 后清理 | PASS；无 `nexus-agent`/Core 残留 | `ps` 实测 |
 
-因此 P1 仍为 **2**：Resizable 的真实拖动/最大化尚未完成；Core Restart 在安装包真实 kill 场景下失败。P0=0、P2=0、P3=0 保持不变。本轮不创建 `v0.4.0-beta.1`，版本继续保持 Release Candidate，直到上述 P1 闭环并重新跑完整 Gate。
+RC3 已重新构建并安装 `/Volumes/AI-DEV/Nexus项目/应用/Nexus.app`，完成真实 Divider 拖动、边界、30 轮快速往返、最大化/恢复、持久化和非法值自愈验收；详见 [`RC3_RESIZABLE_REPORT.md`](RC3_RESIZABLE_REPORT.md)。因此当前 Gate 计数为 P0=0、P1=0、P2=0、P3=0。
+
+## RC3 Resizable 关闭记录（2026-08-18）
+
+旧的 `BLOCKED` 行属于 2026-08-17 修复前现场记录，不代表当前构建。RC3 根因是手动 frame 布局下原生 NSSplitView tracking loop 没有交付可用拖动回调；现已由 `ResizableSplitView` 接管 `mouseDown/mouseDragged/mouseUp`，并将命中区扩大到 10px。真实安装包结果：Sidebar 220↔420、Workspace 280↔620、120 次快速拖动、1440×900↔2560×1330 最大化/恢复、360/500 重启持久化全部 PASS。

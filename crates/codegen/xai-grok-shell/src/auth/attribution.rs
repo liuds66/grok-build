@@ -391,11 +391,8 @@ fn compute_attribution_payload(
 ) -> JsonValue {
     let now = chrono::Utc::now();
 
-    // Last-12-char suffix of the bearer the wire actually carried
-    // (see [`token_suffix`]: JWT headers share a common base64 prefix).
-    // `""` when the request had no bearer at all (distinct case from
-    // "had a bearer that turned out to be stale" -- the gate-criteria
-    // query can break down on this).
+    // The wire bearer is never serialized. Keep only a redacted marker in
+    // the payload while retaining the presence/absence distinction.
     let sent_prefix = sent_bearer.map(token_suffix).unwrap_or("");
 
     // Single read-lock acquisition: pull the live `GrokAuth` (or
@@ -405,13 +402,12 @@ fn compute_attribution_payload(
         .as_ref()
         .map(|a| token_suffix(&a.key).to_string());
 
-    // None current means "no evidence of staleness," not stale --
-    // the downstream stale-vs-live split should only count
-    // true-positive staleness (sent bearer differs from a known live
-    // bearer).
-    let is_stale_snapshot = match current_prefix_owned.as_deref() {
-        Some(c) => sent_prefix != c,
-        None => false,
+    // Compare the short wire prefix with the live token in memory, never
+    // with the redacted values emitted below. The full token is not written
+    // to the payload or logs.
+    let is_stale_snapshot = match (sent_bearer, current_auth.as_ref()) {
+        (Some(sent), Some(current)) => !current.key.starts_with(sent),
+        _ => false,
     };
 
     // Mint-age + expiry come from the same `current_auth` we already
@@ -490,11 +486,10 @@ mod tests {
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
         assert_eq!(payload_field(&payload, "consumer"), "Test.live");
-        // Last 12 chars (tail prefix for JWT-friendly diagnostics).
-        assert_eq!(payload_field(&payload, "sent_key_prefix"), "567890abcdef");
+        assert_eq!(payload_field(&payload, "sent_key_prefix"), "[REDACTED]");
         assert_eq!(
             payload_field(&payload, "current_key_prefix"),
-            "567890abcdef"
+            "[REDACTED]"
         );
         // mint_age_seconds: should be small and non-negative for a
         // freshly-created auth.
@@ -528,10 +523,10 @@ mod tests {
         let payload = compute_attribution_payload(&am, "Test.stale", Some(stale));
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), true);
-        assert_eq!(payload_field(&payload, "sent_key_prefix"), "n-1234567890");
+        assert_eq!(payload_field(&payload, "sent_key_prefix"), "[REDACTED]");
         assert_eq!(
             payload_field(&payload, "current_key_prefix"),
-            "en-different"
+            "[REDACTED]"
         );
         assert_eq!(payload_field(&payload, "consumer"), "Test.stale");
     }
@@ -549,7 +544,7 @@ mod tests {
         let payload = compute_attribution_payload(&am, "Test.absent", Some("any-token"));
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
-        assert_eq!(payload_field(&payload, "sent_key_prefix"), "any-token");
+        assert_eq!(payload_field(&payload, "sent_key_prefix"), "[REDACTED]");
         assert!(payload_field(&payload, "current_key_prefix").is_null());
         assert_eq!(payload_field(&payload, "mint_age_seconds"), -1);
         assert_eq!(payload_field(&payload, "expires_at_seconds_from_now"), 0);
@@ -805,22 +800,21 @@ mod tests {
             .find(|s| s.name == "auth_401_attribution")
             .expect("expected one auth_401_attribution span; got: {spans:?}");
 
-        // String fields: prefixes truncated to 12 chars, consumer +
-        // session_id passed verbatim.
+        // Credential fields are always redacted; consumer + session_id are
+        // still available for operational attribution.
         assert_eq!(
             attribution
                 .fields_str
                 .get("sent_key_prefix")
                 .map(String::as_str),
-            Some("pshot-aaaaaa"),
-            "sent_key_prefix should be last 12 chars",
+            Some("[REDACTED]"),
         );
         assert_eq!(
             attribution
                 .fields_str
                 .get("current_key_prefix")
                 .map(String::as_str),
-            Some("n-1234567890"),
+            Some("[REDACTED]"),
         );
         assert_eq!(
             attribution.fields_str.get("consumer").map(String::as_str),

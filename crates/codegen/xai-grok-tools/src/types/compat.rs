@@ -113,12 +113,17 @@ impl CompatCell {
 
     /// Whether Grok currently implements this compatibility surface.
     ///
-    /// Codex non-session cells remain reserved in the registry so their config
-    /// shape is stable, but runtime discovery does not consume them.
+    /// Codex skills and sessions are supported. The remaining Codex cells stay
+    /// reserved so their config shape is stable until those loaders land.
     pub const fn is_runtime_supported(self) -> bool {
         match self.vendor {
             CompatVendor::Cursor | CompatVendor::Claude => true,
-            CompatVendor::Codex => matches!(self.surface, CompatSurface::Sessions),
+            CompatVendor::Codex => {
+                matches!(
+                    self.surface,
+                    CompatSurface::Skills | CompatSurface::Sessions
+                )
+            }
         }
     }
 }
@@ -359,11 +364,11 @@ impl CompatConfig {
 
     /// Config directories that may contain `skills/` subdirectories, in
     /// priority order. `.grok` and `.agents` are always included; `.claude`
-    /// and `.cursor` are gated on their respective `skills` cell.
+    /// `.cursor`, and `.codex` are gated on their respective `skills` cell.
     ///
-    /// Replaces the hard-coded `[".grok", ".agents", ".claude", ".cursor"]`
-    /// in `collect_skill_config_dirs`. When all cells are on, the returned
-    /// list is identical to the historical constant.
+    /// Extends the historical
+    /// `[".grok", ".agents", ".claude", ".cursor"]` list with Codex skill
+    /// compatibility.
     pub fn skill_config_dirs(&self) -> Vec<&'static str> {
         let mut dirs = vec![".grok", ".agents"];
         if self.claude.skills {
@@ -371,6 +376,9 @@ impl CompatConfig {
         }
         if self.cursor.skills {
             dirs.push(".cursor");
+        }
+        if self.codex.skills {
+            dirs.push(".codex");
         }
         dirs
     }
@@ -504,17 +512,17 @@ mod tests {
                 ("claude", "mcps"),
                 ("claude", "hooks"),
                 ("claude", "sessions"),
+                ("codex", "skills"),
                 ("codex", "sessions"),
             ]
         );
     }
 
     #[test]
-    fn skill_config_dirs_all_on_matches_legacy_constant() {
-        // Historical constant was `[".grok", ".agents", ".claude", ".cursor"]`.
+    fn skill_config_dirs_all_on_includes_codex() {
         assert_eq!(
             CompatConfig::default().skill_config_dirs(),
-            vec![".grok", ".agents", ".claude", ".cursor"]
+            vec![".grok", ".agents", ".claude", ".cursor", ".codex"]
         );
     }
 
@@ -522,15 +530,24 @@ mod tests {
     fn skill_config_dirs_gates_each_vendor() {
         let mut c = CompatConfig::default();
         c.cursor.skills = false;
-        assert_eq!(c.skill_config_dirs(), vec![".grok", ".agents", ".claude"]);
+        assert_eq!(
+            c.skill_config_dirs(),
+            vec![".grok", ".agents", ".claude", ".codex"]
+        );
 
         c.claude.skills = false;
+        assert_eq!(c.skill_config_dirs(), vec![".grok", ".agents", ".codex"]);
+
+        c.codex.skills = false;
         assert_eq!(c.skill_config_dirs(), vec![".grok", ".agents"]);
 
-        // Only the `cursor` cell on (`claude` off): `cursor` still appended last.
+        // Cursor and Codex remain independently controlled.
         let mut c2 = CompatConfig::default();
         c2.claude.skills = false;
-        assert_eq!(c2.skill_config_dirs(), vec![".grok", ".agents", ".cursor"]);
+        assert_eq!(
+            c2.skill_config_dirs(),
+            vec![".grok", ".agents", ".cursor", ".codex"]
+        );
     }
 
     #[test]

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# 构建并安装 Nexus.app，同时在桌面创建一键启动入口。
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd)"
+source_app="${repo_root}/dist/Nexus.app"
+default_install_root="${HOME}/Applications"
+if [[ "${repo_root}" == /Volumes/*/Nexus项目/源代码/* ]]; then
+  nexus_external_root="${repo_root%%/源代码/*}"
+  default_install_root="${nexus_external_root}/应用"
+fi
+install_root="${NEXUS_APP_INSTALL_DIR:-${default_install_root}}"
+installed_app="${install_root}/Nexus.app"
+desktop_link="${HOME}/Desktop/Nexus.app"
+
+"${repo_root}/scripts/build-nexus-desktop"
+mkdir -p "${install_root}"
+
+if [[ -e "${installed_app}" ]]; then
+  backup="${install_root}/Nexus-旧版-$(date +%Y%m%d-%H%M%S).app"
+  mv "${installed_app}" "${backup}"
+  echo "旧版已备份：${backup}"
+fi
+
+cp -R "${source_app}" "${installed_app}"
+codesign --verify --deep --strict "${installed_app}"
+
+if [[ -L "${desktop_link}" ]]; then
+  current_target="$(readlink "${desktop_link}")"
+  if [[ "${current_target}" != "${installed_app}" ]]; then
+    echo "桌面已有其他 Nexus.app 链接，未覆盖：${desktop_link}" >&2
+  fi
+elif [[ -e "${desktop_link}" ]]; then
+  echo "桌面已有 Nexus.app，未覆盖：${desktop_link}" >&2
+else
+  ln -s "${installed_app}" "${desktop_link}"
+fi
+
+echo "Nexus 桌面版已安装：${installed_app}"
+echo "桌面启动入口：${desktop_link}"

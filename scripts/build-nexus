@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd)"
+cd "${repo_root}"
+build_target_dir="${NEXUS_BUILD_TARGET_DIR:-${HOME}/.cache/nexus/target}"
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "需要 Rust。请先通过 rustup 安装 Rust，或直接运行 ./install.sh。" >&2
+  exit 127
+fi
+
+if ! command -v dotslash >/dev/null 2>&1; then
+  echo "上游构建需要 DotSlash。请运行 ./install.sh，或执行：cargo install dotslash" >&2
+  exit 127
+fi
+
+resolve_protoc() {
+  # Prefer the upstream hermetic wrapper when it supports this host.
+  if "${repo_root}/bin/protoc" --version >/dev/null 2>&1; then
+    return
+  fi
+
+  # Some Intel macOS environments run under Rosetta while the upstream
+  # DotSlash manifest currently publishes only the native Apple Silicon
+  # artifact. Use the matching official protobuf release as a local build-only
+  # fallback and pass it through the standard PROTOC override.
+  if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
+    local protoc_version="29.3"
+    local cache_root="${NEXUS_TOOL_CACHE:-${HOME}/.cache/nexus}"
+    local tool_root="${cache_root}/protoc-${protoc_version}-osx-x86_64"
+    local protoc_bin="${tool_root}/bin/protoc"
+    local archive_path="${cache_root}/protoc-${protoc_version}-osx-x86_64.zip"
+
+    if [[ ! -x "${protoc_bin}" ]]; then
+      mkdir -p "${cache_root}"
+      echo "正在为 Intel macOS 下载官方 protobuf ${protoc_version}..." >&2
+      curl --fail --location --proto '=https' --tlsv1.2 \
+        --output "${archive_path}" \
+        "https://github.com/protocolbuffers/protobuf/releases/download/v${protoc_version}/protoc-${protoc_version}-osx-x86_64.zip"
+      unzip -oq "${archive_path}" -d "${tool_root}"
+    fi
+
+    if "${protoc_bin}" --version >/dev/null 2>&1; then
+      export PROTOC="${protoc_bin}"
+      echo "使用 Intel macOS 的 protoc 兼容方案：${PROTOC}" >&2
+      return
+    fi
+  fi
+
+  echo "未找到可用的 protoc。请安装 protobuf，或将 PROTOC 指向可用二进制。" >&2
+  exit 127
+}
+
+resolve_protoc
+mkdir -p "${build_target_dir}"
+CARGO_TARGET_DIR="${build_target_dir}" cargo build -p xai-grok-pager-bin --bin nexus-agent --release
+echo "已构建：${build_target_dir}/release/nexus-agent"

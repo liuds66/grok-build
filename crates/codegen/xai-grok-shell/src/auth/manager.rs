@@ -1006,14 +1006,15 @@ impl AuthManager {
         let disk_auth = self.read_disk_auth();
         let refreshed = self.try_use_disk_token(disk_auth.as_ref(), reason)?;
         let adopted = token_suffix(&refreshed.key);
-        let prev = self.expired_auth().map(|a| token_suffix(&a.key).to_owned());
+        let prev_key = self.expired_auth().map(|a| a.key);
+        let prev = prev_key.as_ref().map(|_| adopted.to_owned());
         xai_grok_telemetry::unified_log::info(
             msg,
             None,
             Some(serde_json::json!({
                 "adopted_key_prefix": adopted,
                 "prev_key_prefix": prev,
-                "key_changed": prev.as_deref() != Some(adopted),
+                "key_changed": prev_key.as_deref() != Some(refreshed.key.as_str()),
             })),
         );
         Some(refreshed)
@@ -1758,7 +1759,7 @@ impl AuthManager {
         attempted_key: Option<String>,
         _lock: &AuthFileLock,
     ) -> Result<GrokAuth, AuthError> {
-        let pre_key_prefix = attempted_key.as_deref().map(token_suffix);
+        let pre_key = attempted_key.as_deref();
         match outcome {
             RefreshOutcome::Success(new_auth) => match self.update(*new_auth).await {
                 Ok(auth) => {
@@ -1768,9 +1769,9 @@ impl AuthManager {
                         None,
                         Some(serde_json::json!({
                             "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
-                            "old_key_prefix": pre_key_prefix,
+                            "old_key_prefix": pre_key.map(|_| new_prefix),
                             "new_key_prefix": new_prefix,
-                            "key_changed": pre_key_prefix != Some(new_prefix),
+                            "key_changed": pre_key != Some(auth.key.as_str()),
                         })),
                     );
                     tracing::info!(expires_at = ?auth.expires_at, "auth.refresh.success");

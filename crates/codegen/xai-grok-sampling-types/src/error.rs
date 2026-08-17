@@ -381,6 +381,41 @@ fn truncate_user_error(s: &str) -> String {
     out
 }
 
+/// Remove credential-shaped fragments from structured upstream errors before
+/// they are returned to the sampler, renderer, or tracing layer. Providers
+/// sometimes echo a rejected key in a 401 message; status-only fallback is
+/// not enough for those structured responses.
+fn redact_error_secrets(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let is_bearer = index + 7 <= bytes.len()
+            && bytes[index..index + 7].eq_ignore_ascii_case(b"bearer ");
+        let is_key_marker = (index + 3 <= bytes.len()
+            && (bytes[index..].starts_with(b"sk-") || bytes[index..].starts_with(b"xai-")))
+            || is_bearer;
+        if is_key_marker {
+            let marker_len = if is_bearer { 7 } else { 3 };
+            let mut end = index + marker_len;
+            while end < bytes.len()
+                && !bytes[end].is_ascii_whitespace()
+                && !matches!(bytes[end], b'"' | b'\'' | b',' | b'}' | b']' | b')' | b';')
+            {
+                end += 1;
+            }
+            output.push_str("<redacted-key>");
+            index = end;
+        } else if let Some(ch) = input[index..].chars().next() {
+            output.push(ch);
+            index += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    output
+}
+
 /// Format a known JSON error envelope; `None` if the body is not structured.
 fn structured_error_message(bytes: &[u8]) -> Option<String> {
     let (error_type, message) = std::str::from_utf8(bytes).ok().and_then(try_parse_error)?;
@@ -389,7 +424,7 @@ fn structured_error_message(bytes: &[u8]) -> Option<String> {
     } else {
         format!("{error_type}: {message}")
     };
-    Some(truncate_user_error(&msg))
+    Some(truncate_user_error(&redact_error_secrets(&msg)))
 }
 
 /// Parse an API error body into a short string.
@@ -620,6 +655,14 @@ mod tests {
         let bytes = br#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#;
         let msg = user_facing_api_error_message(StatusCode::TOO_MANY_REQUESTS, bytes);
         assert_eq!(msg, "rate_limit_error: rate limit exceeded");
+    }
+
+    #[test]
+    fn user_facing_redacts_echoed_credentials() {
+        let bytes = br#"{"error":{"message":"Incorrect API key provided: sk-secret-value-123456"}}"#;
+        let msg = user_facing_api_error_message(StatusCode::UNAUTHORIZED, bytes);
+        assert!(msg.contains("<redacted-key>"));
+        assert!(!msg.contains("sk-secret-value-123456"));
     }
 
     #[test]

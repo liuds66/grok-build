@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# 从源码安装 Nexus：准备 Rust 和 DotSlash，构建二进制，并创建命令入口。
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd)"
+prefix="${NEXUS_INSTALL_PREFIX:-${HOME}/.local}"
+dry_run=false
+skip_deps=false
+skip_build=false
+
+print_help() {
+  cat <<'EOF'
+Nexus 一键安装
+
+用法：
+  ./install.sh [选项]
+
+选项：
+  --prefix <目录>   安装命令入口到 <目录>/bin（默认：~/.local/bin）
+  --skip-deps       跳过 Rust 与 DotSlash 的安装检查
+  --skip-build      跳过编译，仅创建命令入口
+  --dry-run         只显示将要执行的操作，不修改系统
+  -h, --help        显示本帮助
+
+安装不会写入 API Key。完成后运行：
+  nexus init openai
+  export OPENAI_API_KEY="你的密钥"
+  nexus
+EOF
+}
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --prefix)
+      [[ "$#" -ge 2 ]] || { echo "--prefix 需要一个目录参数。" >&2; exit 2; }
+      prefix="$2"
+      shift 2
+      ;;
+    --skip-deps)
+      skip_deps=true
+      shift
+      ;;
+    --skip-build)
+      skip_build=true
+      shift
+      ;;
+    --dry-run)
+      dry_run=true
+      shift
+      ;;
+    -h|--help)
+      print_help
+      exit 0
+      ;;
+    *)
+      echo "未知选项：$1。使用 ./install.sh --help 查看帮助。" >&2
+      exit 2
+      ;;
+  esac
+done
+
+run() {
+  if [[ "${dry_run}" == true ]]; then
+    printf '+ '
+    printf '%q ' "$@"
+    printf '\n'
+    return
+  fi
+  "$@"
+}
+
+load_cargo_env() {
+  if [[ -f "${HOME}/.cargo/env" ]]; then
+    # shellcheck disable=SC1090
+    source "${HOME}/.cargo/env"
+  fi
+}
+
+install_rust() {
+  if command -v cargo >/dev/null 2>&1; then
+    return
+  fi
+  if [[ "${dry_run}" == true ]]; then
+    echo "+ 下载并执行官方 rustup 安装器（minimal profile）"
+    return
+  fi
+  command -v curl >/dev/null 2>&1 || {
+    echo "未找到 curl，无法自动安装 Rust。请先安装 curl 后重试。" >&2
+    exit 127
+  }
+  local installer
+  installer="$(mktemp "${TMPDIR:-/tmp}/nexus-rustup.XXXXXX")"
+  curl --fail --location --proto '=https' --tlsv1.2 \
+    --output "${installer}" https://sh.rustup.rs
+  sh "${installer}" -y --profile minimal
+  rm -f "${installer}"
+  load_cargo_env
+  command -v cargo >/dev/null 2>&1 || {
+    echo "Rust 安装后仍未找到 cargo；请重新打开终端后再运行 ./install.sh。" >&2
+    exit 127
+  }
+}
+
+install_dotslash() {
+  if command -v dotslash >/dev/null 2>&1; then
+    return
+  fi
+  run cargo install dotslash --locked
+  if [[ "${dry_run}" == true ]]; then
+    return
+  fi
+  load_cargo_env
+  command -v dotslash >/dev/null 2>&1 || {
+    echo "DotSlash 安装失败，未找到 dotslash 命令。" >&2
+    exit 127
+  }
+}
+
+if [[ "${skip_deps}" == false ]]; then
+  install_rust
+  load_cargo_env
+  install_dotslash
+fi
+
+if [[ "${skip_build}" == false ]]; then
+  run "${repo_root}/scripts/build-nexus"
+fi
+
+launcher_dir="${prefix}/bin"
+launcher="${launcher_dir}/nexus"
+source_launcher="${repo_root}/bin/nexus"
+
+if [[ -e "${launcher}" || -L "${launcher}" ]]; then
+  existing_target="$(readlink "${launcher}" 2>/dev/null || true)"
+  if [[ "${existing_target}" != "${source_launcher}" ]]; then
+    echo "为保护已有命令，未覆盖：${launcher}" >&2
+    echo "请使用 --prefix 选择其他目录，或手动处理该文件后重试。" >&2
+    exit 1
+  fi
+else
+  run mkdir -p "${launcher_dir}"
+  run ln -s "${source_launcher}" "${launcher}"
+fi
+
+if [[ "${dry_run}" == true ]]; then
+  echo "演练完成：未执行安装或修改任何文件。"
+  exit 0
+fi
+
+echo "Nexus 已安装。命令入口：${launcher}"
+if [[ ":${PATH}:" != *":${launcher_dir}:"* ]]; then
+  echo "请将下列内容加入 ~/.zshrc 或 ~/.bashrc，然后重新打开终端："
+  echo "export PATH=\"${launcher_dir}:\$PATH\""
+fi
+echo "下一步：nexus init openai"

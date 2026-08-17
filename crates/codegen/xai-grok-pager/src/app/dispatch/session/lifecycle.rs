@@ -596,8 +596,8 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         return vec![];
     }
     if !app.cwd_has_git_ancestor {
-        let msg: String = "Not inside a git repository. Navigate to a git repo \
-                      or run 'git init' first."
+        let msg: String = "当前目录不在 Git 仓库中。请进入 Git 项目目录，\
+                      或先运行 'git init'。"
             .into();
         if !app.startup_warnings.iter().any(|w| w.message == msg) {
             app.startup_warnings.push(crate::startup::StartupWarning {
@@ -922,7 +922,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         }
         agent.prompt.file_search.retarget(&session_cwd);
         agent.scrollback.push_block(RenderBlock::system(format!(
-            "Worktree ready: {}",
+            "工作区已就绪：{}",
             worktree_path.display()
         )));
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());

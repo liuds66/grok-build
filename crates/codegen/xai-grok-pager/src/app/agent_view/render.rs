@@ -1388,7 +1388,7 @@ impl AgentView {
         let git_text = branch.map(|b| {
             let icon = crate::git_info::branch_icon();
             if b.is_empty() {
-                format!("{icon} detached")
+                format!("{icon} 游离 HEAD")
             } else {
                 format!("{icon} {b}")
             }
@@ -1408,11 +1408,17 @@ impl AgentView {
             || lazy_git.as_ref().is_some_and(|i| i.is_worktree);
         if show_worktree_label {
             let label_style = Style::default().fg(theme.accent_user).bg(theme.bg_base);
-            path_offset += "worktree ".width() as u16;
-            parts.push(Span::styled("worktree ", label_style));
+            path_offset += "工作区 ".width() as u16;
+            parts.push(Span::styled("工作区 ", label_style));
         }
         if let Some(profile) = xai_grok_sandbox::profile_name() {
-            let sandbox_text = format!("sandbox:{profile} ");
+            let profile_label = match profile {
+                "workspace" => "工作区",
+                "read-only" => "只读",
+                "strict" => "严格",
+                other => other,
+            };
+            let sandbox_text = format!("沙盒：{profile_label} ");
             let sandbox_style = Style::default().fg(theme.warning).bg(theme.bg_base);
             path_offset += sandbox_text.width() as u16;
             parts.push(Span::styled(sandbox_text, sandbox_style));
@@ -1430,7 +1436,7 @@ impl AgentView {
             .or_else(|| lazy_git.as_ref().and_then(|i| i.main_repo.clone()));
         if let Some(main_repo) = main_repo_display {
             parts.push(Span::styled(
-                format!(" (worktree of {main_repo})"),
+                format!("（工作区源：{main_repo}）"),
                 cwd_style,
             ));
         }

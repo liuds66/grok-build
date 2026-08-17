@@ -391,6 +391,56 @@ impl HeadlessEmitter {
         }
     }
 
+    fn on_tool_call(&self, tool_call: &acp::ToolCall) {
+        if self.format != OutputFormat::StreamingJson {
+            return;
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "tool_start",
+                "id": tool_call.tool_call_id.0.to_string(),
+                "title": tool_call.title,
+                "kind": format!("{:?}", tool_call.kind),
+                "status": format!("{:?}", tool_call.status),
+                "input": tool_call.raw_input,
+            })
+        );
+    }
+
+    fn on_tool_call_update(&self, update: &acp::ToolCallUpdate) {
+        if self.format != OutputFormat::StreamingJson {
+            return;
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "tool_update",
+                "id": update.tool_call_id.0.to_string(),
+                "title": update.fields.title,
+                "status": update
+                    .fields
+                    .status
+                    .as_ref()
+                    .map(|status| format!("{status:?}"))
+                    .unwrap_or_else(|| "Updated".to_string()),
+            })
+        );
+    }
+
+    fn on_plan(&self, plan: &acp::Plan) {
+        if self.format != OutputFormat::StreamingJson {
+            return;
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "plan",
+                "data": plan,
+            })
+        );
+    }
+
     fn attach_structured_output(&self, target: &mut serde_json::Value) {
         if !self.parse_structured_output {
             return;
@@ -1513,6 +1563,15 @@ fn handle_headless_acp_message(
                         }
                         emitter.on_thought_chunk(&text.text);
                     }
+                }
+                acp::SessionUpdate::ToolCall(tool_call) => {
+                    emitter.on_tool_call(tool_call);
+                }
+                acp::SessionUpdate::ToolCallUpdate(update) => {
+                    emitter.on_tool_call_update(update);
+                }
+                acp::SessionUpdate::Plan(plan) => {
+                    emitter.on_plan(plan);
                 }
                 _ => {}
             }

@@ -826,7 +826,8 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
 ///
 /// For each path in `file_paths`, walks from `dirname(path)` upward toward
 /// `cwd` (exclusive). At each directory, checks for `.grok/skills/`,
-/// `.agents/skills/`, and (gated on `compat.claude.skills`) `.claude/skills/`.
+/// `.agents/skills/`, (gated on `compat.claude.skills`) `.claude/skills/`, and
+/// (gated on `compat.codex.skills`) `.codex/skills/`.
 /// Skips already-checked dirs.
 ///
 /// Skill/command roots are **not** filtered by `.gitignore`. Discovery only
@@ -849,11 +850,15 @@ pub fn discover_skills_for_paths(
     already_checked: &mut HashSet<PathBuf>,
     compat: CompatConfig,
 ) -> Vec<SkillInfo> {
-    // `.grok` and `.agents` are always scanned; `.claude` is gated on the
-    // claude-vendor skills cell. (`.cursor` is excluded here by design — see fn docs.)
+    // `.grok` and `.agents` are always scanned; `.claude` and `.codex` are
+    // gated on their vendor skills cells. (`.cursor` is excluded here by
+    // design — see fn docs.)
     let mut config_dir_names: Vec<&str> = vec![".grok", ".agents"];
     if compat.claude.skills {
         config_dir_names.push(".claude");
+    }
+    if compat.codex.skills {
+        config_dir_names.push(".codex");
     }
 
     let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
@@ -1505,7 +1510,7 @@ model: test-model
     // ── discover_skills_for_paths vendor gating ────────────
 
     #[test]
-    fn discover_skills_for_paths_gates_claude_dir() {
+    fn discover_skills_for_paths_gates_vendor_dirs() {
         use crate::types::compat::CompatConfig;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1515,7 +1520,7 @@ model: test-model
         let sub = repo.join("sub");
         std::fs::create_dir_all(&sub).unwrap();
 
-        // A .claude skill and a .grok skill in an intermediate dir.
+        // Vendor skills and a native skill in an intermediate dir.
         let claude_skill = sub.join(".claude").join("skills").join("claude-dyn");
         std::fs::create_dir_all(&claude_skill).unwrap();
         std::fs::write(
@@ -1526,6 +1531,9 @@ model: test-model
         let grok_skill = sub.join(".grok").join("skills").join("grok-dyn");
         std::fs::create_dir_all(&grok_skill).unwrap();
         std::fs::write(grok_skill.join("SKILL.md"), "---\nname: grok-dyn\n---\n").unwrap();
+        let codex_skill = sub.join(".codex").join("skills").join("codex-dyn");
+        std::fs::create_dir_all(&codex_skill).unwrap();
+        std::fs::write(codex_skill.join("SKILL.md"), "---\nname: codex-dyn\n---\n").unwrap();
 
         let file = sub.join("file.rs");
         std::fs::write(&file, "fn main() {}").unwrap();
@@ -1548,10 +1556,15 @@ model: test-model
             names_on.contains(&"claude-dyn"),
             "claude-dyn should be found when claude.skills on: {names_on:?}"
         );
+        assert!(
+            names_on.contains(&"codex-dyn"),
+            "codex-dyn should be found when codex.skills on: {names_on:?}"
+        );
 
-        // claude.skills OFF → only grok-dyn discovered.
+        // Vendor toggles independently remove their directories.
         let mut compat_off = CompatConfig::default();
         compat_off.claude.skills = false;
+        compat_off.codex.skills = false;
         let mut checked2 = HashSet::new();
         let off = discover_skills_for_paths(
             &[file.as_path()],
@@ -1568,6 +1581,10 @@ model: test-model
         assert!(
             !names_off.contains(&"claude-dyn"),
             "claude-dyn must be gated off: {names_off:?}"
+        );
+        assert!(
+            !names_off.contains(&"codex-dyn"),
+            "codex-dyn must be gated off: {names_off:?}"
         );
     }
 

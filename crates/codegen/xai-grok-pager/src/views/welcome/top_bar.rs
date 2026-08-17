@@ -60,7 +60,7 @@ pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
     if let Some(branch) = info.as_ref().and_then(|i| i.branch.as_deref()) {
         let icon = git_info::branch_icon();
         let git_text = if branch.is_empty() {
-            format!("{icon} detached")
+            format!("{icon} 游离 HEAD")
         } else {
             format!("{icon} {branch}")
         };
@@ -74,7 +74,7 @@ pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
     // (accent_user) before the path when the cwd is a linked worktree.
     if info.as_ref().is_some_and(|i| i.is_worktree) {
         parts.push(Span::styled(
-            "worktree ",
+            "工作区 ",
             Style::default().fg(theme.accent_user),
         ));
     }
@@ -106,7 +106,7 @@ fn format_cwd_display(cwd: &Path, info: Option<&git_info::CwdGitInfo>) -> String
 /// Pure formatting for the cwd display — no global state, easy to test.
 fn format_cwd_parts(display: &str, main_repo: Option<&str>) -> String {
     if let Some(main_repo) = main_repo {
-        format!("{display} (worktree of {main_repo})")
+        format!("{display}（工作区源：{main_repo}）")
     } else {
         display.to_string()
     }
@@ -139,7 +139,7 @@ mod tests {
     fn format_cwd_worktree_shows_main_repo() {
         assert_eq!(
             format_cwd_parts("~/wt/session-1", Some("~/xai")),
-            "~/wt/session-1 (worktree of ~/xai)"
+            "~/wt/session-1（工作区源：~/xai）"
         );
     }
 
@@ -172,7 +172,7 @@ mod tests {
         };
         assert_eq!(
             format_cwd_display(Path::new("/work/wt/location-picker/frontend"), Some(&info)),
-            "/work/wt/location-picker/frontend (worktree of ~/xai)",
+            "/work/wt/location-picker/frontend（工作区源：~/xai）",
         );
     }
 

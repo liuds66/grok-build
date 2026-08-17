@@ -431,7 +431,7 @@ pub(super) fn render_version_badge(
     }
     if show_api_key && is_api_key_auth {
         spans.push(Span::styled(
-            "Logged in with API key",
+            "已使用 API 密钥登录",
             Style::default().fg(theme.gray),
         ));
         spans.push(sep);
@@ -441,7 +441,7 @@ pub(super) fn render_version_badge(
     match &mode {
         VersionBadgeMode::Full { .. } => {
             spans.push(Span::styled(
-                "Grok Build  ",
+                "Nexus  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -451,7 +451,7 @@ pub(super) fn render_version_badge(
                 Style::default().fg(theme.gray),
             ));
             spans.push(Span::styled(
-                " Beta",
+                " 测试版",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -470,7 +470,7 @@ pub(super) fn render_version_badge(
         }
         VersionBadgeMode::HeroInline => {
             spans.push(Span::styled(
-                "Grok Build Beta  ",
+                "Nexus 测试版  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -693,8 +693,8 @@ pub fn render_welcome(
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
             let label = params.login_label.unwrap_or("grok.com");
-            let login_text = format!("Login with {}", label);
-            let menu = [("l", login_text.as_str()), ("q", "Quit")];
+            let login_text = format!("使用 {} 登录", label);
+            let menu = [("l", login_text.as_str()), ("q", "退出")];
             let msg = error.as_deref().map(|e| (e, theme.accent_error));
             let info = PromptInfo {
                 model_name: params.model_name,
@@ -770,14 +770,11 @@ pub fn render_welcome(
             }
         }
         AuthState::Done if params.is_zdr_blocked => {
-            let menu = [("l", "Switch account"), ("q", "Quit")];
+            let menu = [("l", "切换账号"), ("q", "退出")];
             let (menu_rects, post_flush_escapes) = render_welcome_blocked(
                 content_area,
                 buf,
-                Some((
-                    "Grok Build is not yet available for this account.",
-                    theme.gray_bright,
-                )),
+                Some(("此账号暂时无法使用 Nexus。", theme.gray_bright)),
                 &menu,
                 params.selected,
                 None,
@@ -949,10 +946,10 @@ fn render_welcome_trust(
     h_margin: u16,
     compact: bool,
 ) -> WelcomeRenderResult {
-    let menu_items = [("y", "Yes, proceed"), ("n", "No, quit")];
+    let menu_items = [("y", "是，继续"), ("n", "否，退出")];
     let lines = vec![
         Line::from(Span::styled(
-            "Do you trust the contents of this directory?",
+            "你信任此目录中的内容吗？",
             Style::default().fg(theme.gray_bright),
         ))
         .alignment(Alignment::Center),
@@ -965,12 +962,12 @@ fn render_welcome_trust(
         // Two lines so the warning never clips at narrow / compact widths
         // (a single ~78-char line would truncate "...posing security risks").
         Line::from(Span::styled(
-            "Grok Build may run or modify contents in this directory,",
+            "Nexus 可能运行或修改此目录中的内容，",
             Style::default().fg(theme.gray),
         ))
         .alignment(Alignment::Center),
         Line::from(Span::styled(
-            "posing security risks.",
+            "这可能带来安全风险。",
             Style::default().fg(theme.gray),
         ))
         .alignment(Alignment::Center),
@@ -1017,11 +1014,11 @@ fn render_welcome_trust(
 }
 
 /// Header text shared by Loopback and Command auth modes.
-const AUTH_HEADER: &str = "A browser window will open for authentication.";
+const AUTH_HEADER: &str = "将打开浏览器完成登录验证。";
 /// Header text for the device-flow auth mode.
-const DEVICE_AUTH_HEADER: &str = "Approve in your browser to finish signing in.";
+const DEVICE_AUTH_HEADER: &str = "请在浏览器中确认以完成登录。";
 /// Caption beneath the device code.
-const DEVICE_CODE_CAPTION: &str = "Make sure your browser shows this code.";
+const DEVICE_CODE_CAPTION: &str = "请确认浏览器中显示相同的验证码。";
 
 /// Extract `user_code` from a device verification URL (`None` if absent or
 /// malformed). Shown on-screen so the user can confirm it matches the browser
@@ -1578,7 +1575,7 @@ fn render_changelog_section(
             .fg(theme.gray_bright)
             .add_modifier(Modifier::DIM),
     );
-    let title = "Changelog";
+    let title = "更新日志";
     buf.set_span(
         centered.x,
         centered.y,
@@ -1739,19 +1736,15 @@ fn render_welcome_done(
     } else {
         0
     };
-    let changelog_height = if p.has_access && !show_picker && !p.changelog_bullets.is_empty() {
-        2 + p.changelog_bullets.len() as u16
-    } else {
-        0
-    };
-    // Changelog is reachable via this menu row (ctrl+l). Show from the first
-    // frame so the menu doesn't shift while the CDN fetch completes.
-    let show_changelog_action = p.has_access && !show_picker;
+    // 上游更新日志由远程服务提供，目前只有英文内容。为了保持 Nexus 首屏全中文，
+    // 不在界面中展示或链接到它；版本号仍会在底部状态栏中显示。
+    let changelog_height = 0;
+    let show_changelog_action = false;
 
     let gate_menu;
     let owned_menu;
     let menu_items: &[(&str, &str)] = if !p.has_access {
-        gate_menu = [(key_g, cta), (key_l, "Logout"), (key_q, "Quit")];
+        gate_menu = [(key_g, cta), (key_l, "退出登录"), (key_q, "退出")];
         &gate_menu
     } else {
         let (key_w, key_s, key_q, key_i_with_x) = (
@@ -1769,15 +1762,15 @@ fn render_welcome_done(
             // 3 cells of this row as dismiss instead of open. Keyboard:
             // ctrl-shift-i. The key string is right-aligned by render_menu,
             // so [x] sits at the very end of the row.
-            items.push((key_i_with_x, "Import Claude settings"));
+            items.push((key_i_with_x, "导入 Claude 设置"));
         }
-        items.push((key_w, "New worktree"));
-        items.push((key_s, "Resume session"));
+        items.push((key_w, "新建工作区"));
+        items.push((key_s, "恢复会话"));
         // "Changelog" above Quit; no shortcut — opened by click (row or block).
         if show_changelog_action {
-            items.push(("", "Changelog"));
+            items.push(("", "更新日志"));
         }
-        items.push((key_q, "Quit"));
+        items.push((key_q, "退出"));
         owned_menu = items;
         owned_menu.as_slice()
     };
@@ -2543,13 +2536,13 @@ pub(crate) fn render_session_picker(
     let worktree_shortcut: &'static str = "ctrl+w";
     use crate::views::shortcuts_bar::HintItem;
     let mut default_shortcuts: Vec<HintItem> = vec![
-        HintItem::new(crate::key!(Esc), "back"),
-        HintItem::new(crate::key!(Enter), "select"),
+        HintItem::new(crate::key!(Esc), "返回"),
+        HintItem::new(crate::key!(Enter), "选择"),
     ];
     if !ctx.chat_mode {
         default_shortcuts.push(HintItem {
             keys: vec![],
-            label: "worktree".into(),
+            label: "工作区".into(),
             custom_display: Some(worktree_shortcut),
             description: None,
             pinned: false,
@@ -2557,7 +2550,7 @@ pub(crate) fn render_session_picker(
     }
     default_shortcuts.push(HintItem {
         keys: vec![],
-        label: "navigate".into(),
+        label: "移动".into(),
         custom_display: Some("\u{2191}\u{2193}"),
         description: None,
         pinned: false,
@@ -2565,7 +2558,7 @@ pub(crate) fn render_session_picker(
     if !ctx.chat_mode {
         default_shortcuts.push(HintItem {
             keys: vec![],
-            label: "filter".into(),
+            label: "筛选".into(),
             custom_display: Some("f"),
             description: None,
             pinned: false,
@@ -2573,7 +2566,7 @@ pub(crate) fn render_session_picker(
     }
 
     let config = PickerConfig {
-        title: Some("Resume session"),
+        title: Some("恢复会话"),
         show_search_hint: true,
         expandable: true,
         esc_clears_query: true,

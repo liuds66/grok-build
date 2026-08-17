@@ -1,8 +1,7 @@
-//! Session title generation via LLM tool call.
+//! Session title generation via a text-only LLM request.
 
 use crate::sampling::{
-    Client as OaiCompatClient, ConversationItem, ConversationRequest, ConversationToolChoice,
-    ToolSpec,
+    Client as OaiCompatClient, ConversationItem, ConversationRequest, ConversationResponse,
 };
 use crate::session::helpers::chat::floor_char_boundary;
 
@@ -67,17 +66,41 @@ pub(crate) fn title_fallback_from_user_text(user_message: &str) -> String {
     }
 }
 
-/// Generates a title for the session by looking at the first user message
-/// We do not generate more of it on next user message unless its very important
+/// Normalize a model-generated title. The preferred response is plain text,
+/// but accepting the old JSON shape keeps this compatible with providers that
+/// still follow the previous structured-output prompt.
+fn title_from_response(response: &ConversationResponse) -> Option<String> {
+    let raw = response.assistant_text();
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let candidate = serde_json::from_str::<SessionTitle>(text)
+        .ok()
+        .map(|parsed| parsed.session_title)
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| text.to_owned());
+
+    let cleaned = candidate
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim();
+    (!cleaned.is_empty()).then(|| cleaned.to_owned())
+}
+
+/// Generates a title for the session by looking at the first user message.
 ///
-/// Ideally we should be updating it as the session continues, but ... skipping that for now
-pub async fn generate_session_summary(
-    user_message: String,
-    client: OaiCompatClient,
-    model: &str,
-) -> String {
-    let clean_message = title_source_text(&user_message);
-    let request = ConversationRequest::from_items(vec![
+/// This is intentionally a text-only request. Session naming does not need
+/// tools, and sending a function tool plus `tool_choice` makes otherwise
+/// compatible OpenAI-style providers (notably DeepSeek) reject the request.
+fn build_title_request(clean_message: &str, model: &str) -> ConversationRequest {
+    ConversationRequest::from_items(vec![
         ConversationItem::system(
             r#"You are tasked with generating the session title. The user is asking almost always software engineering related questions on their codebase.
 We describe the session title below
@@ -86,7 +109,7 @@ A short and distinctive 5-10 word descriptive title for the session. Super info 
 
 You will be given the user query below encapsulated in <user_query></user_query>.
 
-Just generate the session_title and nothing else"#,
+Return only the title as plain text. Do not call tools. Do not return JSON or markdown."#,
         ),
         ConversationItem::user(format!(
             r#"<user_query>
@@ -96,37 +119,24 @@ Just generate the session_title and nothing else"#,
         )),
     ])
     .with_model(model)
-    .with_tools(vec![ToolSpec {
-        name: "session_title".to_owned(),
-        description: Some("Generate the session_title which we use for the user_message".to_owned()),
-        parameters: serde_json::json!({
-            "type": "object",
-            "required": ["session_title"],
-            "properties": {
-                "session_title": {
-                    "type": "string",
-                    "description": "Final session title, just 5-10 word descriptive title for the session. Super info dense, no filler."
-                }
-            },
-            "additionalProperties": false
-        }),
-    }])
     .with_max_output_tokens(100)
     .with_temperature(1.0)
-    .with_tool_choice(ConversationToolChoice::Function("session_title".to_owned()));
+}
+
+pub async fn generate_session_summary(
+    user_message: String,
+    client: OaiCompatClient,
+    model: &str,
+) -> String {
+    let clean_message = title_source_text(&user_message);
+    let request = build_title_request(&clean_message, model);
 
     match client.conversation_collect(request).await {
         Ok(response) => {
-            if let Some(a) = response.assistant()
-                && let Some(tool_call) = a.tool_calls.first()
-                && let Ok(result) = serde_json::from_str::<SessionTitle>(&tool_call.arguments)
-            {
-                return result.session_title;
+            if let Some(title) = title_from_response(&response) {
+                return title;
             }
-            tracing::debug!(
-                model = %model,
-                "session title generation: response did not contain a session_title tool call"
-            );
+            tracing::debug!(model = %model, "session title generation: response was empty");
         }
         Err(e) => {
             tracing::warn!(
@@ -143,8 +153,9 @@ Just generate the session_title and nothing else"#,
 mod tests {
     use super::{
         TITLE_SOURCE_MAX_BYTES, strip_system_reminder_blocks, title_fallback_from_user_text,
-        title_source_text,
+        build_title_request, title_from_response, title_source_text,
     };
+    use crate::sampling::{ConversationItem, ConversationResponse};
 
     #[test]
     fn title_source_text_caps_oversized_input() {
@@ -249,5 +260,45 @@ mod tests {
             title_fallback_from_user_text("fix the auth bug in login.rs"),
             "fix the auth bug in login.rs",
         );
+    }
+
+    #[test]
+    fn title_response_is_plain_text_without_tools() {
+        let response = ConversationResponse {
+            items: vec![ConversationItem::assistant("深林 UI 视觉精修")],
+            stop_reason: None,
+            usage: None,
+            cost_usd_ticks: None,
+            message_chunks_emitted: 1,
+            doom_loop_signals: Vec::new(),
+            stop_message: None,
+        };
+        assert_eq!(title_from_response(&response).as_deref(), Some("深林 UI 视觉精修"));
+        assert!(response.assistant().is_some_and(|assistant| assistant.tool_calls.is_empty()));
+    }
+
+    #[test]
+    fn deepseek_title_request_has_no_tools_or_tool_choice() {
+        let request = build_title_request("修复 Rust 构建", "deepseek-v4-flash");
+        assert_eq!(request.model.as_deref(), Some("deepseek-v4-flash"));
+        assert!(request.tools.is_empty());
+        assert!(request.hosted_tools.is_empty());
+        assert!(request.tool_choice.is_none());
+    }
+
+    #[test]
+    fn title_response_accepts_legacy_json_without_requiring_tool_call() {
+        let response = ConversationResponse {
+            items: vec![ConversationItem::assistant(
+                r#"{"session_title":"Rust 核心优化"}"#,
+            )],
+            stop_reason: None,
+            usage: None,
+            cost_usd_ticks: None,
+            message_chunks_emitted: 1,
+            doom_loop_signals: Vec::new(),
+            stop_message: None,
+        };
+        assert_eq!(title_from_response(&response).as_deref(), Some("Rust 核心优化"));
     }
 }

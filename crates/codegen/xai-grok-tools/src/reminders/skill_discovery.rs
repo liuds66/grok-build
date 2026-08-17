@@ -2,7 +2,8 @@
 //!
 //! Contains `SkillDiscoveryReminder`, a cross-cutting `Reminder` that fires
 //! after every tool call to check for SKILL.md files in `.grok/skills/`,
-//! `.agents/skills/`, or `.claude/skills/` directories near the accessed path.
+//! `.agents/skills/`, `.claude/skills/`, or `.codex/skills/` directories near
+//! the accessed path.
 //!
 //! The actual tracking logic lives in
 //! `types::skill_discovery_tracker::SkillDiscoveryTracker`.
@@ -10,9 +11,9 @@
 use std::path::{Path, PathBuf};
 
 /// Directories that contain skill definitions (`.grok/skills/`, `.agents/skills/`,
-/// `.claude/skills/`, `.cursor/skills/`). Shared between startup skill discovery
-/// and runtime `SkillDiscoveryReminder`.
-pub const SKILL_CONFIG_DIRS: &[&str] = &[".grok", ".agents", ".claude", ".cursor"];
+/// `.claude/skills/`, `.cursor/skills/`, `.codex/skills/`). Shared between
+/// startup skill discovery and runtime `SkillDiscoveryReminder`.
+pub const SKILL_CONFIG_DIRS: &[&str] = &[".grok", ".agents", ".claude", ".cursor", ".codex"];
 
 use crate::implementations::skills::discovery;
 use crate::implementations::skills::types::SkillScope;
@@ -79,7 +80,8 @@ impl SkillDiscoveryReminder {
     }
 
     /// Check whether a SKILL.md path is inside a supported skills directory
-    /// (`.grok/skills/`, `.agents/skills/`, or `.claude/skills/`).
+    /// (`.grok/skills/`, `.agents/skills/`, `.claude/skills/`,
+    /// or `.codex/skills/`).
     fn is_in_supported_skills_dir(path: &Path) -> bool {
         for ancestor in path.ancestors().skip(1) {
             if ancestor.file_name().is_some_and(|n| n == "skills") {

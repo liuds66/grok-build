@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# Nexus 离线回归烟测：覆盖启动、配置、CLI、生态和桌面资源，不调用真实模型 API。
+set -uo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd -- "${script_dir}/.." && pwd -P)"
+home_dir="${HOME}"
+agent_bin="${NEXUS_BIN_PATH:-${home_dir}/.cache/nexus/target/release/nexus-agent}"
+launcher="${repo_root}/scripts/external-launcher.sh"
+tmp_dir="$(mktemp -d /tmp/nexus-smoke.XXXXXX)"
+swift_module_cache="${NEXUS_SWIFT_MODULE_CACHE:-${tmp_dir}/swift-module-cache}"
+passed=0
+failed=0
+
+cleanup() {
+  /usr/bin/find "${tmp_dir}" -depth -delete 2>/dev/null || true
+}
+trap cleanup EXIT
+
+pass() {
+  passed=$((passed + 1))
+  printf '通过  %s\n' "$1"
+}
+
+fail() {
+  failed=$((failed + 1))
+  printf '失败  %s\n' "$1" >&2
+}
+
+check() {
+  local name="$1"
+  shift
+  if "$@" >"${tmp_dir}/check.out" 2>&1; then
+    pass "${name}"
+  else
+    fail "${name}"
+  fi
+}
+
+check_link() {
+  local name="$1"
+  local link_path="$2"
+  local target_path="$3"
+  if [[ -L "${link_path}" && "$(readlink "${link_path}")" == "${target_path}" ]]; then
+    pass "${name}"
+  else
+    fail "${name}"
+  fi
+}
+
+printf 'Nexus 离线回归烟测\n'
+printf '项目：%s\n\n' "${repo_root}"
+
+check "仓库脚本语法" bash -n \
+  "${repo_root}/bin/nexus" \
+  "${repo_root}/install.sh" \
+  "${repo_root}/scripts/build-nexus" \
+  "${repo_root}/scripts/build-nexus-desktop" \
+  "${repo_root}/scripts/install-nexus" \
+  "${repo_root}/scripts/install-nexus-desktop" \
+  "${launcher}" \
+  "${repo_root}/scripts/test-nexus"
+check "Git 补丁格式" git -C "${repo_root}" diff --check
+check "桌面端 Swift 类型检查" swiftc -typecheck -framework AppKit -framework Foundation -framework LocalAuthentication -framework Security \
+  -module-cache-path "${swift_module_cache}" \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop"/*.swift
+check "分离 Core/Model/Agent/Workspace 状态" grep -q 'enum CoreState' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/CoreRecovery.swift"
+check "模型配置错误状态" grep -q 'configurationError' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "钥匙串凭据存储" grep -q 'SecureCredentialStore' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "启动不阻塞钥匙串查询" grep -q 'Thread.isMainThread' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "错误卡片操作按钮" grep -q '打开模型设置' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "错误信息脱敏" grep -q 'redactSensitive' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "最近变更中文化" grep -q '最近变更' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "大批量变更首屏限制" grep -q 'prefix(50)' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Cmd+Q 终止代理" grep -q 'applicationShouldTerminate(_ sender' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "中文桌面搜索入口" grep -q '搜索 Session' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "输入框回车发送逻辑" grep -q 'override func keyDown' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "AI Dev One 顶栏" grep -q 'AI Dev One Core' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "森林玻璃背景" grep -q 'drawGrain' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Agent 状态胶囊" grep -q 'BottomStatusBarView' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "常驻 Workspace 三栏" grep -q 'workspacePanel.isHidden = false' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "可调 Sidebar 默认宽度" grep -q 'sidebarDefaultWidth: CGFloat = 260' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "可调 Workspace 默认宽度" grep -q 'workspaceDefaultWidth: CGFloat = 340' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "分栏拖拽容器" grep -q 'final class ResizableSplitView' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "分栏宽度持久化" grep -q 'ai-dev-one.sidebar-width' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "工作区宽度持久化" grep -q 'ai-dev-one.workspace-width' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "任务 checkpoint" grep -q 'CheckpointManager' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/Checkpoint.swift"
+check "任务事务审计" grep -q 'TaskTransactionState' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/TaskTransaction.swift"
+check "验证门 PASS/FAIL/SKIPPED" grep -q 'VerificationStatus' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/VerificationGate.swift"
+check "危险命令 Rust deny" grep -q 'NexusPolicyRules.commandLineArguments' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Chat 最小宽度" grep -q 'chatMinimumWidth: CGFloat = 520' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Sidebar 宽度范围" grep -q 'sidebarMinimumWidth: CGFloat = 220' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Sidebar 最大宽度" grep -q 'sidebarMaximumWidth: CGFloat = 420' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Workspace 最小宽度" grep -q 'workspaceMinimumWidth: CGFloat = 280' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Workspace 最大宽度" grep -q 'workspaceMaximumWidth: CGFloat = 620' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "分栏扩大命中区" grep -q 'additionalEffectiveRectOfDividerAt' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "窗口缩放重排" grep -q 'resizeSubviewsWithOldSize' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "窗口最小尺寸" grep -q 'minimumWindowWidth: CGFloat = 1180' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "窗口启动自愈" grep -q 'validatedSavedWindowFrame' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "窗口与 Renderer 尺寸隔离" grep -q 'final class WindowContentHostView' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "异常 pane 值回默认" grep -q 'normalizedStoredWidth' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "重置界面布局" grep -q 'resetLayoutButton' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "布局快捷键" grep -q 'keyEquivalent: "0"' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "双击恢复分栏" grep -q 'event.clickCount >= 2' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Agent Timeline" grep -q 'AgentTimelineView' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Composer 120px" grep -q 'heightAnchor.constraint(equalToConstant: 120)' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Workspace 禁止横向滚动" grep -q 'scroll.hasHorizontalScroller = false' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+
+if [[ -x "${agent_bin}" ]]; then
+  pass "编码代理存在"
+  nexus_env=(env NEXUS_HOME="${home_dir}/.nexus" GROK_HOME="${home_dir}/.nexus")
+  check "代理版本" "${nexus_env[@]}" "${agent_bin}" --version
+  check "代理帮助" "${nexus_env[@]}" "${agent_bin}" run --help
+  check "代理诊断" "${nexus_env[@]}" "${agent_bin}" doctor
+  check "MCP 列表" "${nexus_env[@]}" "${agent_bin}" mcp list
+  check "插件列表" "${nexus_env[@]}" "${agent_bin}" plugin list
+  check "工作区列表" "${nexus_env[@]}" "${agent_bin}" worktree list
+
+  settings_smoke() {
+    local settings_home
+    settings_home="$(mktemp -d /tmp/nexus-settings-smoke.XXXXXX)"
+    local wrapper="${repo_root}/bin/nexus"
+    local status=0
+    if ! env NEXUS_HOME="${settings_home}" GROK_HOME="${settings_home}" NEXUS_BIN="${agent_bin}" \
+      "${wrapper}" init openai >/dev/null 2>&1; then
+      status=1
+    elif ! printf 'nexus-offline-smoke-key\n' | \
+      env NEXUS_HOME="${settings_home}" GROK_HOME="${settings_home}" NEXUS_BIN="${agent_bin}" \
+      "${wrapper}" settings set-key openai >/dev/null 2>&1; then
+      status=1
+    elif ! env NEXUS_HOME="${settings_home}" GROK_HOME="${settings_home}" NEXUS_BIN="${agent_bin}" \
+      "${wrapper}" settings clear-key openai >/dev/null 2>&1; then
+      status=1
+    fi
+    if [[ ! -f "${settings_home}/config.toml" ]] ||
+       [[ "$(stat -f '%Lp' "${settings_home}/config.toml" 2>/dev/null || printf missing)" != 600 ]]; then
+      status=1
+    fi
+    /usr/bin/find "${settings_home}" -depth -delete 2>/dev/null || true
+    return "${status}"
+  }
+  check "设置初始化、保存和清除" settings_smoke
+else
+  fail "编码代理存在"
+fi
+
+if [[ "${repo_root}" == /Volumes/*/Nexus项目/源代码/* ]]; then
+  external_root="${repo_root%%/源代码/*}"
+  expected_source="${external_root}/源代码/grok Build底座"
+  expected_data="${external_root}/数据/.nexus"
+  expected_cache="${external_root}/缓存/nexus"
+  expected_sessions="${external_root}/数据/Library/Application Support/Nexus"
+  expected_app="${external_root}/应用/Nexus.app"
+
+  check "外置项目目录" test -d "${repo_root}"
+  check_link "源码链接" "${home_dir}/Documents/grok Build底座" "${expected_source}"
+  check_link "配置链接" "${home_dir}/.nexus" "${expected_data}"
+  check_link "缓存链接" "${home_dir}/.cache/nexus" "${expected_cache}"
+  check_link "会话链接" "${home_dir}/Library/Application Support/Nexus" "${expected_sessions}"
+  check "外置桌面 App" test -d "${expected_app}"
+  check_link "桌面启动入口" "${home_dir}/Desktop/Nexus.app" "${expected_app}"
+  check "App 签名校验" codesign --verify --deep --strict "${expected_app}"
+  check "App 主程序" test -x "${expected_app}/Contents/MacOS/Nexus"
+  check "App 编码代理" test -x "${expected_app}/Contents/Resources/nexus-agent"
+
+  launcher_test_home="$(mktemp -d /tmp/nexus-launcher-home.XXXXXX)"
+  if NEXUS_LAUNCHER_SKIP_OPEN=1 HOME="${launcher_test_home}" bash "${launcher}" \
+    >"${tmp_dir}/launcher.out" 2>&1; then
+    check_link "启动器自愈-源码" "${launcher_test_home}/Documents/grok Build底座" "${expected_source}"
+    check_link "启动器自愈-配置" "${launcher_test_home}/.nexus" "${expected_data}"
+    check_link "启动器自愈-缓存" "${launcher_test_home}/.cache/nexus" "${expected_cache}"
+    check_link "启动器自愈-会话" "${launcher_test_home}/Library/Application Support/Nexus" "${expected_sessions}"
+  else
+    fail "启动器自愈执行"
+  fi
+  /usr/bin/find "${launcher_test_home}" -depth -delete 2>/dev/null || true
+else
+  printf '提示  当前源码不在外置容器，跳过外置链接测试\n'
+fi
+
+if [[ "${1:-}" == "--gui" ]]; then
+  if /usr/bin/pgrep -f '/Nexus.app/Contents/MacOS/Nexus' >/dev/null 2>&1; then
+    pass "桌面进程运行中"
+  else
+    fail "桌面进程运行中"
+  fi
+else
+  printf '提示  未指定 --gui，跳过桌面进程检查（不会主动启动 App）\n'
+fi
+
+printf '\n结果：通过 %d，失败 %d\n' "${passed}" "${failed}"
+if (( failed > 0 )); then
+  exit 1
+fi
