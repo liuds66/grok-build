@@ -1,0 +1,5651 @@
+import AppKit
+import Foundation
+import LocalAuthentication
+import Security
+
+// MARK: - 颜色与小组件
+
+enum Palette {
+    // AI Dev One 的深森林玻璃色板：克制、低饱和，并始终保持深色模式。
+    static let sidebar = NSColor(calibratedRed: 0.018, green: 0.085, blue: 0.105, alpha: 0.72)
+    static let canvas = NSColor(calibratedRed: 0.012, green: 0.055, blue: 0.075, alpha: 0.58)
+    static let elevated = NSColor(calibratedRed: 0.028, green: 0.105, blue: 0.13, alpha: 0.62)
+    static let subtle = NSColor(calibratedRed: 0.035, green: 0.17, blue: 0.19, alpha: 0.70)
+    static let selected = NSColor(calibratedRed: 0.03, green: 0.24, blue: 0.26, alpha: 0.78)
+    static let border = NSColor(calibratedRed: 0.47, green: 1.0, blue: 0.94, alpha: 0.16)
+    static let secondaryText = NSColor(calibratedRed: 0.55, green: 0.66, blue: 0.66, alpha: 0.9)
+    static let accent = NSColor(calibratedRed: 0.176, green: 0.886, blue: 0.902, alpha: 1)
+    static let violet = NSColor(calibratedRed: 0.608, green: 0.486, blue: 1.0, alpha: 1)
+    static let blue = NSColor(calibratedRed: 0.243, green: 0.549, blue: 1.0, alpha: 1)
+    static let success = NSColor(calibratedRed: 0.224, green: 0.902, blue: 0.647, alpha: 1)
+    static let warning = NSColor(calibratedRed: 1.0, green: 0.58, blue: 0.34, alpha: 1)
+    static let error = NSColor(calibratedRed: 0.98, green: 0.32, blue: 0.42, alpha: 1)
+    static let deepGreen = NSColor(calibratedRed: 0.08, green: 0.42, blue: 0.28, alpha: 1)
+    static let forestTop = NSColor(calibratedRed: 0.024, green: 0.118, blue: 0.11, alpha: 1)
+    static let forestBottom = NSColor(calibratedRed: 0.008, green: 0.025, blue: 0.08, alpha: 1)
+}
+
+final class GlassEffectView: NSVisualEffectView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+final class GlassHighlightView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        let gradient = CGGradient(
+            colorsSpace: CGColorSpaceCreateDeviceRGB(),
+            colors: [NSColor.white.withAlphaComponent(0.055).cgColor, NSColor.clear.cgColor] as CFArray,
+            locations: [0, 1]
+        )
+        guard let gradient else { return }
+        context.drawLinearGradient(
+            gradient,
+            start: CGPoint(x: 0, y: bounds.height),
+            end: CGPoint(x: 0, y: bounds.height * 0.56),
+            options: []
+        )
+    }
+}
+
+class LayerView: NSView {
+    var fillColor: NSColor {
+        didSet { needsDisplay = true }
+    }
+    var cornerRadius: CGFloat {
+        didSet { layer?.cornerRadius = cornerRadius }
+    }
+    var strokeColor: NSColor? {
+        didSet { needsDisplay = true }
+    }
+    private var glassEffect: GlassEffectView?
+    private var highlightView: GlassHighlightView?
+
+    init(fillColor: NSColor = .clear, cornerRadius: CGFloat = 0, strokeColor: NSColor? = nil) {
+        self.fillColor = fillColor
+        self.cornerRadius = cornerRadius
+        self.strokeColor = strokeColor
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = cornerRadius
+        layer?.masksToBounds = false
+        layer?.shadowColor = NSColor.black.withAlphaComponent(0.52).cgColor
+        layer?.shadowOpacity = cornerRadius > 0 ? 0.42 : 0
+        layer?.shadowRadius = cornerRadius > 0 ? 18 : 0
+        layer?.shadowOffset = CGSize(width: 0, height: -7)
+        if cornerRadius >= 8 {
+            let effect = GlassEffectView()
+            effect.translatesAutoresizingMaskIntoConstraints = false
+            effect.material = .hudWindow
+            effect.blendingMode = .withinWindow
+            effect.state = .active
+            effect.alphaValue = 0.54
+            effect.wantsLayer = true
+            effect.layer?.cornerRadius = cornerRadius
+            effect.layer?.masksToBounds = true
+            addSubview(effect, positioned: .below, relativeTo: nil)
+            NSLayoutConstraint.activate([
+                effect.leadingAnchor.constraint(equalTo: leadingAnchor),
+                effect.trailingAnchor.constraint(equalTo: trailingAnchor),
+                effect.topAnchor.constraint(equalTo: topAnchor),
+                effect.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ])
+            glassEffect = effect
+            let highlight = GlassHighlightView()
+            highlight.translatesAutoresizingMaskIntoConstraints = false
+            highlight.wantsLayer = true
+            highlight.layer?.cornerRadius = cornerRadius
+            highlight.layer?.masksToBounds = true
+            addSubview(highlight, positioned: .above, relativeTo: effect)
+            NSLayoutConstraint.activate([
+                highlight.leadingAnchor.constraint(equalTo: leadingAnchor),
+                highlight.trailingAnchor.constraint(equalTo: trailingAnchor),
+                highlight.topAnchor.constraint(equalTo: topAnchor),
+                highlight.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ])
+            highlightView = highlight
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("不支持从归档创建")
+    }
+
+    override func updateLayer() {
+        layer?.backgroundColor = fillColor.cgColor
+        layer?.cornerRadius = cornerRadius
+        layer?.borderWidth = strokeColor == nil ? 0 : 1
+        layer?.borderColor = strokeColor?.cgColor
+        layer?.shadowPath = cornerRadius > 0
+            ? CGPath(roundedRect: bounds, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
+            : nil
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+}
+
+/// 隔离 NSWindow 尺寸求解与 Renderer 内部 Auto Layout 的宿主。
+///
+/// hostedView 不通过约束连接到宿主，因此三栏内容的 fittingSize 不会反向
+/// 改写窗口边界；宿主由系统 contentView 通过 frame/autoresize 管理。
+final class WindowContentHostView: NSView {
+    private let hostedView: NSView
+
+    init(hostedView: NSView, frameSize: NSSize) {
+        self.hostedView = hostedView
+        super.init(frame: NSRect(origin: .zero, size: frameSize))
+        autoresizesSubviews = false
+        hostedView.translatesAutoresizingMaskIntoConstraints = true
+        hostedView.frame = bounds
+        hostedView.autoresizingMask = [.width, .height]
+        addSubview(hostedView)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("不支持从归档创建")
+    }
+
+    override func layout() {
+        super.layout()
+        hostedView.frame = bounds
+        hostedView.needsLayout = true
+        hostedView.layoutSubtreeIfNeeded()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        hostedView.frame = bounds
+        hostedView.needsLayout = true
+    }
+}
+
+/// 不依赖图片资源的荧光森林背景：用渐变、叶脉和微光粒子保持界面轻盈。
+final class ForestBackdropView: NSView {
+    private var phase: CGFloat = 0
+    private var animationTimer: Timer?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 6.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            // 保持原来的漂浮速度，只降低整层重绘频率，避免空闲窗口高 CPU。
+            self.phase += 0.0021
+            if self.phase > 1 { self.phase -= 1 }
+            self.needsDisplay = true
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("不支持从归档创建")
+    }
+
+    deinit {
+        animationTimer?.invalidate()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        let rect = bounds
+        NSGradient(colors: [Palette.forestTop, Palette.canvas, Palette.forestBottom])?.draw(
+            in: rect,
+            angle: -18
+        )
+
+        context.saveGState()
+        drawGlow(at: NSPoint(x: rect.width * 0.14, y: rect.height * 0.14), radius: 280, color: Palette.accent)
+        drawGlow(at: NSPoint(x: rect.width * 0.87, y: rect.height * 0.82), radius: 250, color: Palette.violet)
+        drawGlow(at: NSPoint(x: rect.width * 0.58, y: rect.height * 0.92), radius: 220, color: Palette.deepGreen)
+        drawLeafVeins(in: rect)
+        drawParticles(in: rect)
+        drawGrain(in: rect, context: context)
+        context.restoreGState()
+    }
+
+    private func drawGlow(at center: NSPoint, radius: CGFloat, color: NSColor) {
+        for step in stride(from: 1.0, through: 0.12, by: -0.10) {
+            let currentRadius = radius * step
+            let alpha = CGFloat(0.008 + (1.0 - step) * 0.035)
+            color.withAlphaComponent(alpha).setFill()
+            NSBezierPath(
+                ovalIn: NSRect(
+                    x: center.x - currentRadius,
+                    y: center.y - currentRadius,
+                    width: currentRadius * 2,
+                    height: currentRadius * 2
+                )
+            ).fill()
+        }
+    }
+
+    private func drawLeafVeins(in rect: NSRect) {
+        let paths: [(NSPoint, NSPoint, NSPoint, NSPoint, NSColor)] = [
+            (
+                NSPoint(x: -30, y: rect.height * 0.82),
+                NSPoint(x: rect.width * 0.10, y: rect.height * 0.93),
+                NSPoint(x: rect.width * 0.22, y: rect.height * 0.78),
+                NSPoint(x: rect.width * 0.34, y: rect.height * 0.88),
+                Palette.accent
+            ),
+            (
+                NSPoint(x: rect.width * 0.54, y: rect.height * 0.16),
+                NSPoint(x: rect.width * 0.66, y: rect.height * 0.32),
+                NSPoint(x: rect.width * 0.84, y: rect.height * 0.40),
+                NSPoint(x: rect.width + 30, y: rect.height * 0.63),
+                Palette.violet
+            ),
+            (
+                NSPoint(x: rect.width * 0.12, y: rect.height + 20),
+                NSPoint(x: rect.width * 0.30, y: rect.height * 0.86),
+                NSPoint(x: rect.width * 0.47, y: rect.height * 0.96),
+                NSPoint(x: rect.width * 0.64, y: rect.height + 30),
+                Palette.deepGreen
+            ),
+        ]
+        for (start, c1, c2, end, color) in paths {
+            let path = NSBezierPath()
+            path.move(to: start)
+            path.curve(to: end, controlPoint1: c1, controlPoint2: c2)
+            path.lineWidth = 0.72
+            color.withAlphaComponent(0.065).setStroke()
+            path.stroke()
+
+            for index in 1...4 {
+                let ratio = CGFloat(index) / 5
+                let point = NSPoint(
+                    x: start.x + (end.x - start.x) * ratio,
+                    y: start.y + (end.y - start.y) * ratio
+                )
+                let branch = NSBezierPath()
+                branch.move(to: point)
+                branch.line(to: NSPoint(x: point.x + 22, y: point.y + (index.isMultiple(of: 2) ? 16 : -16)))
+                branch.lineWidth = 0.55
+                color.withAlphaComponent(0.042).setStroke()
+                branch.stroke()
+            }
+            for index in 1...5 {
+                let ratio = CGFloat(index) / 6
+                let node = NSPoint(
+                    x: start.x + (end.x - start.x) * ratio,
+                    y: start.y + (end.y - start.y) * ratio
+                )
+                let radius: CGFloat = index == 3 ? 2.0 : 1.0
+                color.withAlphaComponent(index == 3 ? 0.24 : 0.09).setFill()
+                NSBezierPath(ovalIn: NSRect(
+                    x: node.x - radius,
+                    y: node.y - radius,
+                    width: radius * 2,
+                    height: radius * 2
+                )).fill()
+            }
+        }
+    }
+
+    private func drawParticles(in rect: NSRect) {
+        let seeds: [(CGFloat, CGFloat, CGFloat)] = [
+            (0.18, 0.16, 1), (0.42, 0.79, 2), (0.56, 0.67, 1), (0.68, 0.84, 1),
+            (0.88, 0.78, 2), (0.35, 0.30, 1), (0.79, 0.30, 1), (0.62, 0.56, 1),
+        ]
+        for (index, seed) in seeds.enumerated() {
+            let (x, y, size) = seed
+            let drift = sin(phase * .pi * 2 + CGFloat(index)) * 0.009
+            let color = index.isMultiple(of: 3) ? Palette.violet : Palette.accent
+            color.withAlphaComponent(0.18).setFill()
+            NSBezierPath(ovalIn: NSRect(
+                x: rect.width * (x + drift),
+                y: rect.height * (y + drift * 0.6),
+                width: size,
+                height: size
+            )).fill()
+        }
+    }
+
+    private func drawGrain(in rect: NSRect, context: CGContext) {
+        // 极轻的颗粒，让大面积渐变不显得像一张平面色块。
+        context.setFillColor(NSColor.white.withAlphaComponent(0.012).cgColor)
+        var seed: UInt32 = 19
+        for _ in 0..<150 {
+            seed = 1664525 &* seed &+ 1013904223
+            let x = CGFloat(seed % 1000) / 1000 * rect.width
+            seed = 1664525 &* seed &+ 1013904223
+            let y = CGFloat(seed % 1000) / 1000 * rect.height
+            context.fill(CGRect(x: x, y: y, width: 0.55, height: 0.55))
+        }
+    }
+}
+
+// MARK: - AI Dev One 顶部与底部框架
+
+final class TopBarView: LayerView {
+    var onSettings: (() -> Void)?
+
+    init() {
+        super.init(fillColor: Palette.sidebar.withAlphaComponent(0.68), cornerRadius: 0, strokeColor: Palette.border)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let logo = LayerView(fillColor: Palette.accent.withAlphaComponent(0.13), cornerRadius: 17, strokeColor: Palette.accent.withAlphaComponent(0.45))
+        logo.translatesAutoresizingMaskIntoConstraints = false
+        let leaf = NSImageView()
+        leaf.translatesAutoresizingMaskIntoConstraints = false
+        leaf.image = symbol("leaf.fill", size: 18, weight: .medium)
+        leaf.contentTintColor = Palette.accent
+        logo.addSubview(leaf)
+        leaf.pinEdges(to: logo, insets: NSEdgeInsets(top: 7, left: 7, bottom: 7, right: 7))
+
+        let product = label("AI Dev One", size: 15, weight: .semibold, color: NSColor(calibratedWhite: 0.92, alpha: 1))
+        product.translatesAutoresizingMaskIntoConstraints = false
+        let route = label("Route 2", size: 12, color: Palette.secondaryText)
+        route.translatesAutoresizingMaskIntoConstraints = false
+
+        let core = LayerView(fillColor: Palette.elevated.withAlphaComponent(0.72), cornerRadius: 18, strokeColor: Palette.border)
+        core.translatesAutoresizingMaskIntoConstraints = false
+        let coreLeaf = NSImageView()
+        coreLeaf.translatesAutoresizingMaskIntoConstraints = false
+        coreLeaf.image = symbol("leaf.fill", size: 12)
+        coreLeaf.contentTintColor = Palette.accent
+        let coreTitle = label("AI Dev One Core", size: 12.5, weight: .medium)
+        coreTitle.translatesAutoresizingMaskIntoConstraints = false
+        let coreVersion = label("v0.3", size: 11, color: Palette.secondaryText)
+        coreVersion.translatesAutoresizingMaskIntoConstraints = false
+        let localDot = label("● Local Agent", size: 10.5, color: Palette.success)
+        localDot.translatesAutoresizingMaskIntoConstraints = false
+        let chevron = NSImageView()
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+        chevron.image = symbol("chevron.down", size: 10, weight: .semibold)
+        chevron.contentTintColor = Palette.secondaryText
+        [coreLeaf, coreTitle, coreVersion, localDot, chevron].forEach(core.addSubview)
+        NSLayoutConstraint.activate([
+            coreLeaf.leadingAnchor.constraint(equalTo: core.leadingAnchor, constant: 14),
+            coreLeaf.centerYAnchor.constraint(equalTo: core.centerYAnchor),
+            coreLeaf.widthAnchor.constraint(equalToConstant: 16),
+            coreLeaf.heightAnchor.constraint(equalToConstant: 16),
+            coreTitle.leadingAnchor.constraint(equalTo: coreLeaf.trailingAnchor, constant: 7),
+            coreTitle.centerYAnchor.constraint(equalTo: core.centerYAnchor),
+            coreVersion.leadingAnchor.constraint(equalTo: coreTitle.trailingAnchor, constant: 6),
+            coreVersion.centerYAnchor.constraint(equalTo: coreTitle.centerYAnchor),
+            localDot.leadingAnchor.constraint(equalTo: coreVersion.trailingAnchor, constant: 16),
+            localDot.centerYAnchor.constraint(equalTo: core.centerYAnchor),
+            chevron.leadingAnchor.constraint(equalTo: localDot.trailingAnchor, constant: 14),
+            chevron.trailingAnchor.constraint(equalTo: core.trailingAnchor, constant: -13),
+            chevron.centerYAnchor.constraint(equalTo: core.centerYAnchor),
+            chevron.widthAnchor.constraint(equalToConstant: 13),
+            chevron.heightAnchor.constraint(equalToConstant: 13),
+        ])
+
+        let search = HoverButton(frame: .zero)
+        search.translatesAutoresizingMaskIntoConstraints = false
+        search.isBordered = false
+        search.title = "  搜索 ⌘K"
+        search.font = .systemFont(ofSize: 11.5)
+        search.alignment = .left
+        search.image = symbol("magnifyingglass", size: 12)
+        search.imagePosition = .imageLeading
+        search.contentTintColor = Palette.secondaryText
+        search.wantsLayer = true
+        search.layer?.cornerRadius = 16
+        search.layer?.borderWidth = 1
+        search.layer?.borderColor = Palette.border.cgColor
+        search.normalColor = Palette.elevated.withAlphaComponent(0.4)
+        search.hoverColor = Palette.subtle
+        search.layer?.backgroundColor = search.normalColor.cgColor
+
+        let bell = iconButton("bell", tooltip: "通知")
+        let spark = iconButton("sparkles", tooltip: "Agent 状态")
+        spark.contentTintColor = Palette.accent
+        let settings = iconButton("gearshape", tooltip: "设置")
+        settings.target = self
+        settings.action = #selector(settingsClicked)
+
+        [logo, product, route, core, search, spark, bell, settings].forEach(addSubview)
+        NSLayoutConstraint.activate([
+            logo.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            logo.centerYAnchor.constraint(equalTo: centerYAnchor),
+            logo.widthAnchor.constraint(equalToConstant: 34),
+            logo.heightAnchor.constraint(equalToConstant: 34),
+            product.leadingAnchor.constraint(equalTo: logo.trailingAnchor, constant: 10),
+            product.centerYAnchor.constraint(equalTo: centerYAnchor),
+            route.leadingAnchor.constraint(equalTo: product.trailingAnchor, constant: 8),
+            route.centerYAnchor.constraint(equalTo: centerYAnchor),
+            core.centerXAnchor.constraint(equalTo: centerXAnchor),
+            core.centerYAnchor.constraint(equalTo: centerYAnchor),
+            core.widthAnchor.constraint(equalToConstant: 222),
+            core.heightAnchor.constraint(equalToConstant: 36),
+            settings.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            settings.centerYAnchor.constraint(equalTo: centerYAnchor),
+            settings.widthAnchor.constraint(equalToConstant: 32),
+            settings.heightAnchor.constraint(equalToConstant: 32),
+            bell.trailingAnchor.constraint(equalTo: settings.leadingAnchor, constant: -7),
+            bell.centerYAnchor.constraint(equalTo: centerYAnchor),
+            bell.widthAnchor.constraint(equalToConstant: 32),
+            bell.heightAnchor.constraint(equalToConstant: 32),
+            spark.trailingAnchor.constraint(equalTo: bell.leadingAnchor, constant: -7),
+            spark.centerYAnchor.constraint(equalTo: centerYAnchor),
+            spark.widthAnchor.constraint(equalToConstant: 32),
+            spark.heightAnchor.constraint(equalToConstant: 32),
+            search.trailingAnchor.constraint(equalTo: spark.leadingAnchor, constant: -12),
+            search.centerYAnchor.constraint(equalTo: centerYAnchor),
+            search.widthAnchor.constraint(equalToConstant: 176),
+            search.heightAnchor.constraint(equalToConstant: 32),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("不支持从归档创建") }
+
+    private func iconButton(_ imageName: String, tooltip: String) -> HoverButton {
+        let button = HoverButton(frame: .zero)
+        button.isBordered = false
+        button.image = symbol(imageName, size: 14, weight: .medium)
+        button.imagePosition = .imageOnly
+        button.contentTintColor = Palette.secondaryText
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 16
+        button.layer?.borderWidth = 1
+        button.layer?.borderColor = Palette.border.cgColor
+        button.normalColor = Palette.elevated.withAlphaComponent(0.45)
+        button.hoverColor = Palette.subtle
+        button.layer?.backgroundColor = button.normalColor.cgColor
+        button.toolTip = tooltip
+        return button
+    }
+
+    @objc private func settingsClicked() { onSettings?() }
+}
+
+final class BottomStatusBarView: LayerView {
+    private let coreStatus = label("●  Rust Core", size: 10.5, weight: .medium, color: Palette.success)
+    private let modelStatus = label("●  模型就绪", size: 10.5, weight: .medium, color: Palette.success)
+    private let agentStatus = label("○  Agent 空闲", size: 10.5, weight: .medium, color: Palette.secondaryText)
+    private let restartCoreButton = NSButton(title: "重新启动 Core", target: nil, action: nil)
+    private let viewCoreLogButton = NSButton(title: "查看日志", target: nil, action: nil)
+    private let coreActions = NSStackView()
+
+    var onRestartCore: (() -> Void)?
+    var onViewCoreLog: (() -> Void)?
+
+    init() {
+        super.init(fillColor: Palette.sidebar.withAlphaComponent(0.7), cornerRadius: 0, strokeColor: Palette.border)
+        translatesAutoresizingMaskIntoConstraints = false
+        let version = label("◈  AI Dev One Core v0.3.0", size: 11, color: Palette.secondaryText)
+        let local = capsule("●  本地模式", color: Palette.success)
+        let monitor = capsule("⌁  性能监控", color: Palette.accent)
+        [restartCoreButton, viewCoreLogButton].forEach { button in
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.bezelStyle = .texturedRounded
+            button.isBordered = false
+            button.font = .systemFont(ofSize: 10.5, weight: .medium)
+            button.contentTintColor = Palette.error
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 10
+            button.layer?.backgroundColor = Palette.error.withAlphaComponent(0.10).cgColor
+            button.layer?.borderWidth = 1
+            button.layer?.borderColor = Palette.error.withAlphaComponent(0.25).cgColor
+        }
+        restartCoreButton.target = self
+        restartCoreButton.action = #selector(restartCoreClicked)
+        restartCoreButton.toolTip = "停止当前恢复计时并重新启动 Core"
+        viewCoreLogButton.target = self
+        viewCoreLogButton.action = #selector(viewCoreLogClicked)
+        viewCoreLogButton.toolTip = "打开 Core 最近日志"
+        coreActions.translatesAutoresizingMaskIntoConstraints = false
+        coreActions.orientation = .horizontal
+        coreActions.spacing = 5
+        coreActions.addArrangedSubview(restartCoreButton)
+        coreActions.addArrangedSubview(viewCoreLogButton)
+        coreActions.isHidden = true
+        [coreStatus, modelStatus, agentStatus].forEach { field in
+            field.wantsLayer = true
+            field.layer?.cornerRadius = 11
+            field.layer?.backgroundColor = Palette.canvas.withAlphaComponent(0.34).cgColor
+            field.layer?.borderWidth = 1
+            field.layer?.borderColor = Palette.border.withAlphaComponent(0.55).cgColor
+            field.alignment = .center
+            field.setContentHuggingPriority(.required, for: .horizontal)
+        }
+        [version, coreStatus, local, modelStatus, coreActions, agentStatus, monitor].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
+        }
+        NSLayoutConstraint.activate([
+            version.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            version.centerYAnchor.constraint(equalTo: centerYAnchor),
+            coreStatus.leadingAnchor.constraint(equalTo: version.trailingAnchor, constant: 28),
+            coreStatus.centerYAnchor.constraint(equalTo: centerYAnchor),
+            coreStatus.heightAnchor.constraint(equalToConstant: 24),
+            local.leadingAnchor.constraint(equalTo: coreStatus.trailingAnchor, constant: 8),
+            local.centerYAnchor.constraint(equalTo: centerYAnchor),
+            local.heightAnchor.constraint(equalToConstant: 24),
+            modelStatus.leadingAnchor.constraint(equalTo: local.trailingAnchor, constant: 8),
+            modelStatus.centerYAnchor.constraint(equalTo: centerYAnchor),
+            modelStatus.heightAnchor.constraint(equalToConstant: 24),
+            coreActions.leadingAnchor.constraint(equalTo: modelStatus.trailingAnchor, constant: 8),
+            coreActions.centerYAnchor.constraint(equalTo: centerYAnchor),
+            coreActions.heightAnchor.constraint(equalToConstant: 24),
+            restartCoreButton.heightAnchor.constraint(equalToConstant: 24),
+            viewCoreLogButton.heightAnchor.constraint(equalToConstant: 24),
+            agentStatus.trailingAnchor.constraint(equalTo: monitor.leadingAnchor, constant: -16),
+            agentStatus.centerYAnchor.constraint(equalTo: centerYAnchor),
+            agentStatus.heightAnchor.constraint(equalToConstant: 24),
+            monitor.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            monitor.centerYAnchor.constraint(equalTo: centerYAnchor),
+            monitor.heightAnchor.constraint(equalToConstant: 24),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("不支持从归档创建") }
+
+    func setAgentStatus(_ text: String, color: NSColor) {
+        agentStatus.stringValue = (text.localizedCaseInsensitiveContains("idle") || text.contains("空闲") ? "○  " : "●  ") + text
+        agentStatus.textColor = color
+        agentStatus.layer?.borderColor = color.withAlphaComponent(0.22).cgColor
+        agentStatus.layer?.backgroundColor = color.withAlphaComponent(0.08).cgColor
+    }
+
+    func setModelStatus(_ text: String, color: NSColor) {
+        modelStatus.stringValue = "●  " + text
+        modelStatus.textColor = color
+        modelStatus.layer?.borderColor = color.withAlphaComponent(0.22).cgColor
+        modelStatus.layer?.backgroundColor = color.withAlphaComponent(0.08).cgColor
+    }
+
+    func setCoreStatus(_ text: String, color: NSColor) {
+        coreStatus.stringValue = "●  " + text
+        coreStatus.textColor = color
+        coreStatus.layer?.borderColor = color.withAlphaComponent(0.22).cgColor
+        coreStatus.layer?.backgroundColor = color.withAlphaComponent(0.08).cgColor
+        let actionable = text.contains("断开") || text.contains("失败") || text.contains("无法")
+        coreActions.isHidden = !actionable
+        restartCoreButton.isEnabled = actionable
+        viewCoreLogButton.isEnabled = actionable
+    }
+
+    @objc private func restartCoreClicked() { onRestartCore?() }
+    @objc private func viewCoreLogClicked() { onViewCoreLog?() }
+
+    private func capsule(_ text: String, color: NSColor) -> NSTextField {
+        let field = label(text, size: 10.5, weight: .medium, color: color)
+        field.wantsLayer = true
+        field.layer?.cornerRadius = 11
+        field.layer?.backgroundColor = color.withAlphaComponent(0.08).cgColor
+        field.layer?.borderWidth = 1
+        field.layer?.borderColor = color.withAlphaComponent(0.18).cgColor
+        field.alignment = .center
+        field.setContentHuggingPriority(.required, for: .horizontal)
+        return field
+    }
+}
+
+final class HoverButton: NSButton {
+    private var trackingAreaRef: NSTrackingArea?
+    var normalColor: NSColor = .clear
+    var hoverColor: NSColor = Palette.subtle
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        layer?.backgroundColor = hoverColor.cgColor
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        layer?.backgroundColor = normalColor.cgColor
+    }
+}
+
+extension NSView {
+    func pinEdges(to other: NSView, insets: NSEdgeInsets = NSEdgeInsets()) {
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            leadingAnchor.constraint(equalTo: other.leadingAnchor, constant: insets.left),
+            trailingAnchor.constraint(equalTo: other.trailingAnchor, constant: -insets.right),
+            topAnchor.constraint(equalTo: other.topAnchor, constant: insets.top),
+            bottomAnchor.constraint(equalTo: other.bottomAnchor, constant: -insets.bottom),
+        ])
+    }
+}
+
+func symbol(_ name: String, size: CGFloat = 15, weight: NSFont.Weight = .regular) -> NSImage? {
+    let config = NSImage.SymbolConfiguration(pointSize: size, weight: weight)
+    return NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+        .withSymbolConfiguration(config)
+}
+
+func label(
+    _ text: String,
+    size: CGFloat = 13,
+    weight: NSFont.Weight = .regular,
+    color: NSColor = .labelColor
+) -> NSTextField {
+    let field = NSTextField(labelWithString: text)
+    field.font = .systemFont(ofSize: size, weight: weight)
+    field.textColor = color
+    field.lineBreakMode = .byTruncatingTail
+    field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    return field
+}
+
+// MARK: - 本地数据
+
+enum MessageRole: String, Codable {
+    case user
+    case assistant
+    case system
+    case tool
+}
+
+// MARK: - 桌面端状态模型
+
+enum ModelState: String {
+    case ready
+    case missingKey = "missing_key"
+    case unauthorized
+    case rateLimited = "rate_limited"
+    case offline
+    case configurationError = "configuration_error"
+}
+
+enum AgentState: String {
+    case idle
+    case planning
+    case running
+    case testing
+    case reviewing
+    case completed
+    case failed
+    case cancelled
+}
+
+enum WorkspaceState: String {
+    case ready
+    case scanning
+    case gitDirty = "git_dirty"
+    case missing
+    case error
+}
+
+struct ChatMessage: Codable, Identifiable {
+    var id = UUID()
+    var role: MessageRole
+    var content: String
+    var createdAt = Date()
+    var toolID: String? = nil
+    var toolStatus: String? = nil
+}
+
+struct ChatSession: Codable, Identifiable {
+    var id = UUID()
+    var backendSessionID = UUID().uuidString.lowercased()
+    var title = "新任务"
+    var projectPath: String
+    var messages: [ChatMessage] = []
+    var backendCreated = false
+    var createdAt = Date()
+    var updatedAt = Date()
+}
+
+final class SessionStore {
+    static let shared = SessionStore()
+
+    private(set) var sessions: [ChatSession] = []
+    private let fileURL: URL
+
+    private init() {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let folder = support.appendingPathComponent("Nexus", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        fileURL = folder.appendingPathComponent("desktop-sessions.json")
+        load()
+    }
+
+    func load() {
+        guard
+            let data = try? Data(contentsOf: fileURL),
+            let decoded = try? JSONDecoder.nexus.decode([ChatSession].self, from: data)
+        else {
+            sessions = []
+            return
+        }
+        sessions = decoded.map { stored in
+            var session = stored
+            session.messages.removeAll { message in
+                let emptyAssistant = message.role == .assistant
+                    && message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let collision = message.role == .system
+                    && message.content.localizedCaseInsensitiveContains("Session ID")
+                    && message.content.localizedCaseInsensitiveContains("already in use")
+                return emptyAssistant || collision
+            }
+            // Older builds could persist a generic cancellation card before
+            // the more actionable model/API error arrived. Collapse that
+            // stale card on load so existing sessions are repaired as well
+            // as newly-created failures.
+            let hasModelError = session.messages.contains { message in
+                guard message.role == .system else { return false }
+                let text = message.content.lowercased()
+                return text.contains("api 配置")
+                    || text.contains("api key")
+                    || text.contains("密钥")
+                    || text.contains("unauthorized")
+                    || text.contains("401")
+            }
+            if hasModelError {
+                session.messages.removeAll { message in
+                    guard message.role == .system else { return false }
+                    let text = message.content.lowercased()
+                    return text.contains("任务已停止")
+                        || text.contains("已取消")
+                        || text.contains("cancel")
+                }
+            }
+            return session
+        }.sorted { $0.updatedAt > $1.updatedAt }
+        save()
+    }
+
+    func save() {
+        sessions.sort { $0.updatedAt > $1.updatedAt }
+        guard let data = try? JSONEncoder.nexus.encode(sessions) else { return }
+        try? data.write(to: fileURL, options: [.atomic])
+    }
+
+    func create(projectPath: String) -> ChatSession {
+        let session = ChatSession(projectPath: projectPath)
+        sessions.insert(session, at: 0)
+        save()
+        return session
+    }
+
+    func update(_ session: ChatSession) {
+        if let index = sessions.firstIndex(where: { $0.id == session.id }) {
+            sessions[index] = session
+        } else {
+            sessions.insert(session, at: 0)
+        }
+        save()
+    }
+
+    func remove(id: UUID) {
+        sessions.removeAll { $0.id == id }
+        save()
+    }
+}
+
+extension JSONEncoder {
+    static var nexus: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+}
+
+extension JSONDecoder {
+    static var nexus: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+}
+
+// MARK: - 配置
+
+/// 使用 macOS 钥匙串保存桌面端凭据。服务名和账户名固定，升级 App 或迁移
+/// 到外置磁盘后仍能找到同一项；任何错误都只返回状态，不把密钥写入日志。
+enum SecureCredentialStore {
+    private static let service = "com.ai-dev-one.nexus.api-key"
+    private static let account = "openai-coding"
+    private static let cacheLock = NSLock()
+    private static var cachedValue: String?
+    private static var didRead = false
+    private static var loadInFlight = false
+    private static var completionDelivered = false
+    private static var lastReadStatus: OSStatus = errSecSuccess
+    private static var currentState: CredentialLoadState = .loadingCredentials
+
+    static var loadState: CredentialLoadState {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return currentState
+    }
+
+    private static var identity: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+    }
+
+    static func read() -> String? {
+        cacheLock.lock()
+        if didRead || loadInFlight {
+            let value = cachedValue
+            cacheLock.unlock()
+            return value
+        }
+        cacheLock.unlock()
+        // Security.framework can wait for a login-keychain interaction. Never
+        // perform that potentially blocking operation on AppKit's main thread.
+        guard !Thread.isMainThread else { return nil }
+        return readBlocking()
+    }
+
+    static func warmup(completion: (() -> Void)? = nil) {
+        load(timeout: 2.5) { _ in completion?() }
+    }
+
+    /// Cold-start credential loading is bounded. A login-keychain/securityd
+    /// stall may outlive this call, but it can never block AppKit or trigger a
+    /// second prompt; the renderer receives a stable error state instead.
+    static func load(
+        timeout: TimeInterval = 2.5,
+        completion: @escaping (CredentialLoadState) -> Void
+    ) {
+        cacheLock.lock()
+        if didRead {
+            let value = cachedValue
+            let state: CredentialLoadState = value == nil ? .credentialsMissing : .credentialsReady
+            currentState = state
+            cacheLock.unlock()
+            DispatchQueue.main.async { completion(state) }
+            return
+        }
+        guard !loadInFlight else {
+            cacheLock.unlock()
+            return
+        }
+        loadInFlight = true
+        completionDelivered = false
+        currentState = .loadingCredentials
+        cacheLock.unlock()
+
+        DispatchQueue.global(qos: .utility).async {
+            let value = readBlocking()
+            cacheLock.lock()
+            loadInFlight = false
+            let status = lastReadStatus
+            let state: CredentialLoadState
+            if value != nil {
+                state = .credentialsReady
+            } else if status == errSecAuthFailed || status == errSecInteractionNotAllowed || status == errSecUserCanceled {
+                state = .credentialsDenied
+            } else {
+                state = .credentialsMissing
+            }
+            currentState = state
+            // A slow first Keychain read may legitimately finish after the
+            // bounded timeout callback has already exposed credentials_error.
+            // A late successful read is authoritative and must refresh the UI
+            // once instead of leaving the renderer in that transient state.
+            let lateSuccess = value != nil && completionDelivered
+            let shouldDeliver = !completionDelivered || lateSuccess
+            if shouldDeliver { completionDelivered = true }
+            cacheLock.unlock()
+            guard shouldDeliver else { return }
+            DispatchQueue.main.async { completion(state) }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.5, timeout)) {
+            cacheLock.lock()
+            guard loadInFlight, !completionDelivered else {
+                cacheLock.unlock()
+                return
+            }
+            completionDelivered = true
+            currentState = .credentialsError
+            cacheLock.unlock()
+            completion(.credentialsError)
+        }
+    }
+
+    private static func readBlocking() -> String? {
+        cacheLock.lock()
+        if didRead {
+            let value = cachedValue
+            cacheLock.unlock()
+            return value
+        }
+        cacheLock.unlock()
+        var query = identity
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        // 桌面启动不能弹出钥匙串授权对话框或卡住主线程；若当前登录会话
+        // 无法无交互读取，则立即回退到环境变量/设置页，而不是白屏。
+        query[kSecUseAuthenticationContext as String] = nonInteractiveAuthenticationContext()
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        cacheLock.lock()
+        lastReadStatus = status
+        cacheLock.unlock()
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let value = String(data: data, encoding: .utf8),
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            cacheLock.lock()
+            cachedValue = nil
+            didRead = true
+            cacheLock.unlock()
+            return nil
+        }
+        cacheLock.lock()
+        cachedValue = value
+        didRead = true
+        cacheLock.unlock()
+        return value
+    }
+
+    static func save(_ value: String) throws {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("\n"), !trimmed.contains("\r") else {
+            throw NSError(
+                domain: "NexusCredentialStore",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "接口密钥不能为空或包含换行。"]
+            )
+        }
+        let data = Data(trimmed.utf8)
+        var updateQuery = identity
+        updateQuery[kSecUseAuthenticationContext as String] = nonInteractiveAuthenticationContext()
+        let updateStatus = SecItemUpdate(
+            updateQuery as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+        )
+        if updateStatus == errSecSuccess {
+            cacheLock.lock()
+            cachedValue = trimmed
+            didRead = true
+            currentState = .credentialsReady
+            cacheLock.unlock()
+            return
+        }
+        guard updateStatus == errSecItemNotFound else {
+            throw keychainError(status: updateStatus)
+        }
+
+        var item = identity
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        item[kSecUseAuthenticationContext as String] = nonInteractiveAuthenticationContext()
+        let addStatus = SecItemAdd(item as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw keychainError(status: addStatus)
+        }
+        cacheLock.lock()
+        cachedValue = trimmed
+        didRead = true
+        currentState = .credentialsReady
+        cacheLock.unlock()
+    }
+
+    static func delete() throws {
+        let status = SecItemDelete(identity as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw keychainError(status: status)
+        }
+        cacheLock.lock()
+        cachedValue = nil
+        didRead = true
+        currentState = .credentialsMissing
+        cacheLock.unlock()
+    }
+
+    private static func keychainError(status: OSStatus) -> NSError {
+        NSError(
+            domain: NSOSStatusErrorDomain,
+            code: Int(status),
+            userInfo: [NSLocalizedDescriptionKey: "无法访问 macOS 钥匙串（错误码 \(status)）。"]
+        )
+    }
+
+    private static func nonInteractiveAuthenticationContext() -> LAContext {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return context
+    }
+}
+
+final class NexusConfiguration {
+    static let shared = NexusConfiguration()
+
+    let homeURL: URL
+    let configURL: URL
+
+    private init() {
+        homeURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".nexus", isDirectory: true)
+        configURL = homeURL.appendingPathComponent("config.toml")
+    }
+
+    var hasAPIKey: Bool {
+        if SecureCredentialStore.read() != nil {
+            return true
+        }
+        if let environmentKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"],
+           !environmentKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        return legacyAPIKey() != nil
+    }
+
+    func hardenPermissions() {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: homeURL.path)
+        if FileManager.default.fileExists(atPath: configURL.path) {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+        }
+    }
+
+    /// 仅用于一次性迁移旧版本写入 TOML 的密钥；成功后会从配置中删除明文。
+    func migrateLegacyAPIKeyIfNeeded() {
+        guard let legacy = legacyAPIKey() else {
+            SecureCredentialStore.warmup()
+            return
+        }
+        // 迁移放到后台，钥匙串不可用或等待登录时也不会阻塞 AppKit 启动。
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            do {
+                try SecureCredentialStore.save(legacy)
+                DispatchQueue.main.async {
+                    try? self?.removePlaintextAPIKey()
+                }
+            } catch {
+                // 钥匙串不可用时保留旧值作为兼容回退，但不向日志输出任何凭据。
+            }
+        }
+    }
+
+    func removePlaintextAPIKey() throws {
+        guard let content = try? String(contentsOf: configURL, encoding: .utf8) else { return }
+        var inside = false
+        var removed = false
+        let filtered = content.components(separatedBy: .newlines).filter { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == "[model.openai-coding]" {
+                inside = true
+            } else if trimmed.hasPrefix("[") {
+                inside = false
+            }
+            if inside, trimmed.hasPrefix("api_key"), trimmed.contains("=") {
+                removed = true
+                return false
+            }
+            return true
+        }
+        guard removed else { return }
+        try filtered.joined(separator: "\n").write(to: configURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+    }
+
+    private func legacyAPIKey() -> String? {
+        guard let content = try? String(contentsOf: configURL, encoding: .utf8) else { return nil }
+        var inOpenAI = false
+        for line in content.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == "[model.openai-coding]" {
+                inOpenAI = true
+                continue
+            }
+            if trimmed.hasPrefix("[") {
+                inOpenAI = false
+            }
+            if inOpenAI, trimmed.hasPrefix("api_key"), trimmed.contains("=") {
+                let value = trimmed.split(separator: "=", maxSplits: 1).last?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                var unquoted = value
+                if unquoted.hasPrefix("\"") && unquoted.hasSuffix("\"") && unquoted.count >= 2 {
+                    unquoted.removeFirst()
+                    unquoted.removeLast()
+                }
+                return unquoted != "\"\"" && !unquoted.isEmpty ? unquoted : nil
+            }
+        }
+        return nil
+    }
+
+    func value(named key: String, inSection section: String) -> String? {
+        guard let content = try? String(contentsOf: configURL, encoding: .utf8) else { return nil }
+        var inside = false
+        for line in content.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == "[\(section)]" {
+                inside = true
+                continue
+            }
+            if trimmed.hasPrefix("[") {
+                inside = false
+            }
+            guard inside, trimmed.hasPrefix("\(key)"), let equal = trimmed.firstIndex(of: "=") else {
+                continue
+            }
+            var value = trimmed[trimmed.index(after: equal)...]
+                .trimmingCharacters(in: .whitespaces)
+            if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
+                value.removeFirst()
+                value.removeLast()
+            }
+            return value
+        }
+        return nil
+    }
+
+    func ensureOpenAIConfig() throws {
+        try FileManager.default.createDirectory(
+            at: homeURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: homeURL.path)
+        guard !FileManager.default.fileExists(atPath: configURL.path) else { return }
+
+        let preset = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/config/presets/openai.toml")
+        if FileManager.default.fileExists(atPath: preset.path) {
+            try FileManager.default.copyItem(at: preset, to: configURL)
+        } else {
+            let initial = """
+            [models]
+            default = "openai-coding"
+
+            [model.openai-coding]
+            model = "deepseek-v4-flash"
+            base_url = "https://api.deepseek.com"
+            name = "DeepSeek 编码模型"
+            description = "使用 DeepSeek OpenAI-compatible API"
+            api_backend = "chat_completions"
+            env_key = "OPENAI_API_KEY"
+            """
+            try initial.write(to: configURL, atomically: true, encoding: .utf8)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+    }
+
+    func updateOpenAI(model: String, baseURL: String) throws {
+        try ensureOpenAIConfig()
+        let safeModel = try validateTOMLValue(model, fieldName: "模型")
+        let safeURL = try validateTOMLValue(baseURL, fieldName: "接口地址")
+        var lines = try String(contentsOf: configURL, encoding: .utf8)
+            .components(separatedBy: .newlines)
+        var inside = false
+        var modelWritten = false
+        var urlWritten = false
+        var backendWritten = false
+
+        for index in lines.indices {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            if trimmed == "[model.openai-coding]" {
+                inside = true
+                continue
+            }
+            if trimmed.hasPrefix("[") {
+                inside = false
+            }
+            guard inside else { continue }
+            if trimmed.hasPrefix("model"), trimmed.contains("=") {
+                lines[index] = "model = \"\(safeModel)\""
+                modelWritten = true
+            } else if trimmed.hasPrefix("base_url"), trimmed.contains("=") {
+                lines[index] = "base_url = \"\(safeURL)\""
+                urlWritten = true
+            } else if trimmed.hasPrefix("api_backend"), trimmed.contains("=") {
+                let backend = safeURL.localizedCaseInsensitiveContains("api.openai.com")
+                    ? "responses"
+                    : "chat_completions"
+                lines[index] = "api_backend = \"\(backend)\""
+                backendWritten = true
+            }
+        }
+        guard modelWritten, urlWritten, backendWritten else {
+            throw NSError(
+                domain: "NexusConfiguration",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "模型配置不完整，请重新安装 AI Dev One。"]
+            )
+        }
+        // OpenAI-compatible 中转站通常只提供当前编码模型；如果辅助任务
+        // 继续沿用内置 grok-4.5，会在新会话启动/生成标题时产生误导性的
+        // “密钥无效”错误。保存设置时让辅助任务跟随当前可用模型，避免
+        // 用户每次改完中转地址后还要手动编辑 TOML。
+        synchronizeAuxiliaryModels(in: &lines, model: safeModel)
+        let output = lines.joined(separator: "\n")
+        try output.write(to: configURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+    }
+
+    private func synchronizeAuxiliaryModels(in lines: inout [String], model: String) {
+        let keys = ["session_summary", "image_description"]
+        guard let sectionStart = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines) == "[models]"
+        }) else {
+            lines.insert(contentsOf: [
+                "[models]",
+                "session_summary = \"\(model)\"",
+                "image_description = \"\(model)\"",
+                "",
+            ], at: 0)
+            return
+        }
+
+        let sectionEnd = lines[(sectionStart + 1)...].firstIndex(where: {
+            let trimmed = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.hasPrefix("[")
+        }) ?? lines.endIndex
+        var updated = Set<String>()
+        for index in (sectionStart + 1)..<sectionEnd {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            for key in keys where trimmed.hasPrefix("\(key)") && trimmed.contains("=") {
+                lines[index] = "\(key) = \"\(model)\""
+                updated.insert(key)
+            }
+        }
+
+        let missing = keys.filter { !updated.contains($0) }
+        if !missing.isEmpty {
+            lines.insert(contentsOf: missing.map { "\($0) = \"\(model)\"" }, at: sectionEnd)
+        }
+    }
+
+    private func validateTOMLValue(_ value: String, fieldName: String) throws -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.contains("\"") || trimmed.contains("\\")
+            || trimmed.contains("\n") || trimmed.contains("\r") {
+            throw NSError(
+                domain: "NexusConfiguration",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "\(fieldName)不能为空，也不能包含引号、反斜杠或换行。"]
+            )
+        }
+        return trimmed
+    }
+}
+
+enum BackendLocator {
+    /// 任务执行不应依赖外置盘上的大体积二进制。安装器会把运行时复制到
+    /// 本机 Application Support；如果旧版本尚未复制，则继续安全回退到
+    /// 本地缓存、应用包资源和兼容路径。
+    static var localRuntimeDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AI Dev One/Runtime", isDirectory: true)
+    }
+
+    static var localRuntimeWrapperURL: URL {
+        localRuntimeDirectory.appendingPathComponent("nexus")
+    }
+
+    static var localRuntimeBinaryURL: URL {
+        localRuntimeDirectory.appendingPathComponent("nexus-agent")
+    }
+
+    private static func isUsableExecutable(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return FileManager.default.isExecutableFile(atPath: url.path)
+    }
+
+    static var wrapperURL: URL? {
+        let bundled = Bundle.main.resourceURL?.appendingPathComponent("nexus")
+        let local = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/nexus")
+        let candidates = [localRuntimeWrapperURL, local, bundled, URL(fileURLWithPath: "/usr/local/bin/nexus")]
+        return candidates.compactMap { $0 }.first {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        }
+    }
+
+    static var bundledBinaryURL: URL? {
+        Bundle.main.resourceURL?.appendingPathComponent("nexus-agent")
+    }
+
+    static var preferredBinaryURL: URL? {
+        let homeCache = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/nexus/target/release/nexus-agent")
+        let candidates = [
+            localRuntimeBinaryURL,
+            homeCache,
+            bundledBinaryURL,
+        ]
+        return candidates.compactMap { $0 }.first(where: isUsableExecutable)
+    }
+
+    static func processEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment["NEXUS_HOME"] = NexusConfiguration.shared.homeURL.path
+        environment["GROK_HOME"] = NexusConfiguration.shared.homeURL.path
+        environment["GROK_DISABLE_AUTOUPDATER"] = "1"
+        environment["GROK_TELEMETRY_ENABLED"] = "0"
+        environment["GROK_TELEMETRY_TRACE_UPLOAD"] = "0"
+        environment["DISABLE_TELEMETRY"] = "1"
+        // Finder-launched apps receive a minimal PATH. Re-add the toolchains
+        // installed by the one-click installer so project commands such as
+        // `npm test`, `cargo test`, and `python` do not fail merely because
+        // the user did not launch the app from a shell. Missing directories
+        // are ignored; the user's existing PATH remains the fallback.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let toolchainBins = [
+            home.appendingPathComponent("Library/Application Support/AI Dev One Installer/toolchains/node/bin"),
+            home.appendingPathComponent("Library/Application Support/AI Dev One Installer/toolchains/cargo/bin"),
+            localRuntimeDirectory.appendingPathComponent("toolchains/node/bin"),
+        ].filter { FileManager.default.fileExists(atPath: $0.path) }
+        let existingPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let injectedPath = toolchainBins.map(\.path).joined(separator: ":")
+        environment["PATH"] = injectedPath.isEmpty ? existingPath : injectedPath + ":" + existingPath
+        // 桌面端优先从钥匙串注入凭据；外部环境变量仍可用于临时调试，
+        // 但绝不把密钥作为命令行参数传递给代理。
+        if (environment["OPENAI_API_KEY"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let key = SecureCredentialStore.read() {
+            environment["OPENAI_API_KEY"] = key
+        }
+        if let baseURL = NexusConfiguration.shared.value(
+            named: "base_url",
+            inSection: "model.openai-coding"
+        ), !baseURL.localizedCaseInsensitiveContains("api.openai.com"),
+           environment["GROK_MAX_RETRIES"] == nil {
+            // 中转站常把不可用模型返回为 502/503；避免 UI 长时间等待无效重试。
+            environment["GROK_MAX_RETRIES"] = "1"
+        }
+        if let binary = preferredBinaryURL {
+            environment["NEXUS_BIN"] = binary.path
+        }
+        return environment
+    }
+}
+
+// MARK: - 后端执行
+
+enum RunnerEvent {
+    case coreState(CoreState)
+    case text(String)
+    case thought(String)
+    case tool(id: String, title: String, status: String, detail: String?)
+    case plan(String)
+    case ended(sessionID: String?)
+    case failed(String)
+}
+
+enum TaskApproval: Equatable {
+    case allowWorkspace
+    case readOnly
+}
+
+/// 唯一的 Core 生命周期所有者。
+///
+/// 任务流仍由现有 Rust/ACP runtime 执行；本类只负责桌面端进程引用、退出
+/// 分类、健康检查、有限退避和手动重启，避免 View/Controller 各自 spawn Core。
+final class CoreSupervisor {
+    private var process: Process?
+    private var launchInFlight = false
+    private var healthCheckInFlight = false
+    private let parsingQueue = DispatchQueue(label: "cn.nexus.desktop.stream")
+    private var stdoutBuffer = ""
+    private var stderrBuffer = ""
+    private var streamedError = ""
+    private var reachedEnd = false
+    private var stopRequested = false
+    private var manualShutdown = false
+    private var generation: UInt64 = 0
+    private var recoveryWorkItem: DispatchWorkItem?
+    private var stableResetWorkItem: DispatchWorkItem?
+    private var manualRestartInFlight = false
+    private(set) var restartAttempt = 0
+    private(set) var lastPID: Int32?
+    private(set) var lastExitCode: Int32?
+    private(set) var lastError: String?
+    private(set) var state: CoreState = .stopped
+
+    var isRunning: Bool { process?.isRunning == true || launchInFlight }
+
+    private static let retryDelays: [TimeInterval] = [1, 2, 5]
+
+    static var logFileURL: URL {
+        let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs/AI Dev One", isDirectory: true)
+        try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        return logs.appendingPathComponent("core-supervisor.log")
+    }
+
+    private func log(_ message: String) {
+        let safe = redactSensitive(message).replacingOccurrences(of: "\n", with: " ")
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(safe)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if FileManager.default.fileExists(atPath: Self.logFileURL.path),
+           let handle = try? FileHandle(forWritingTo: Self.logFileURL) {
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        } else {
+            try? data.write(to: Self.logFileURL, options: .atomic)
+        }
+    }
+
+    private func emit(_ state: CoreState, event: ((RunnerEvent) -> Void)? = nil) {
+        self.state = state
+        log("state=\(state.rawValue)")
+        if let event { event(.coreState(state)) }
+    }
+
+    /// Schedules a bounded health-check recovery. It never resends the old
+    /// prompt: the interrupted transaction remains interrupted and the user
+    /// chooses whether to rerun or roll back.
+    func scheduleAutomaticRecovery(onState: @escaping (CoreState) -> Void) {
+        guard !manualShutdown else { return }
+        guard !manualRestartInFlight, !healthCheckInFlight, recoveryWorkItem == nil else { return }
+        guard restartAttempt < Self.retryDelays.count else {
+            emit(.failed)
+            onState(.failed)
+            log("automatic recovery exhausted")
+            return
+        }
+
+        restartAttempt += 1
+        let attempt = restartAttempt
+        let delay = Self.retryDelays[attempt - 1]
+        emit(.restarting)
+        onState(.restarting)
+        log("schedule restart attempt=\(attempt) delay=\(delay)s")
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.recoveryWorkItem = nil
+            guard !self.manualShutdown else { return }
+            self.startHealthCheck(onState: onState, automaticAttempt: attempt)
+        }
+        recoveryWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    /// A user-visible, single-flight restart. It is deliberately separate
+    /// from automatic recovery so repeated clicks cannot spawn duplicate Core
+    /// processes.
+    func manualRestart(onState: @escaping (CoreState) -> Void) {
+        guard !manualRestartInFlight else { return }
+        manualRestartInFlight = true
+        manualShutdown = false
+        recoveryWorkItem?.cancel()
+        recoveryWorkItem = nil
+        stableResetWorkItem?.cancel()
+        stableResetWorkItem = nil
+        restartAttempt = 0
+        generation &+= 1
+        let old = process
+        process = nil
+        launchInFlight = false
+        healthCheckInFlight = false
+        if let old, old.isRunning { old.terminate() }
+        emit(.starting)
+        onState(.starting)
+        log("manual restart requested")
+        startHealthCheck(onState: { [weak self] state in
+            guard let self else { return }
+            if state == .ready || state == .failed { self.manualRestartInFlight = false }
+            onState(state)
+        }, automaticAttempt: nil)
+    }
+
+    /// Called for Cmd+Q/window close. This flag makes termination handlers
+    /// inert with respect to recovery, preventing an exit→spawn loop.
+    func shutdown() {
+        manualShutdown = true
+        generation &+= 1
+        recoveryWorkItem?.cancel()
+        stableResetWorkItem?.cancel()
+        recoveryWorkItem = nil
+        stableResetWorkItem = nil
+        restartAttempt = 0
+        stopRequested = true
+        let old = process
+        process = nil
+        launchInFlight = false
+        healthCheckInFlight = false
+        if let old, old.isRunning { old.terminate() }
+        emit(.stopped)
+        log("shutdown")
+    }
+
+    private func startHealthCheck(
+        onState: @escaping (CoreState) -> Void,
+        automaticAttempt: Int?
+    ) {
+        guard !manualShutdown, !healthCheckInFlight, process == nil,
+              let executable = BackendLocator.wrapperURL else {
+            manualRestartInFlight = false
+            emit(.failed)
+            onState(.failed)
+            log("health check unavailable: wrapper missing")
+            return
+        }
+        let token = generation
+        let task = Process()
+        task.executableURL = executable
+        task.arguments = ["--version"]
+        task.environment = BackendLocator.processEnvironment()
+        let output = Pipe()
+        let errorPipe = Pipe()
+        task.standardOutput = output
+        task.standardError = errorPipe
+        healthCheckInFlight = true
+        process = task
+        lastPID = task.processIdentifier
+        emit(.starting)
+        onState(.starting)
+        log("health check spawn attempt=\(automaticAttempt.map(String.init) ?? "manual")")
+        task.terminationHandler = { [weak self] finished in
+            let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            guard let self else { return }
+            DispatchQueue.main.async {
+                guard self.generation == token else { return }
+                self.healthCheckInFlight = false
+                self.process = nil
+                self.lastExitCode = finished.terminationStatus
+                let ok = finished.terminationReason == .exit && finished.terminationStatus == 0
+                if ok {
+                    self.manualRestartInFlight = false
+                    self.emit(.ready)
+                    onState(.ready)
+                    self.log("health check passed pid=\(self.lastPID.map(String.init) ?? "unknown")")
+                    self.stableResetWorkItem?.cancel()
+                    let reset = DispatchWorkItem { [weak self] in self?.restartAttempt = 0 }
+                    self.stableResetWorkItem = reset
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: reset)
+                } else if self.manualRestartInFlight {
+                    self.manualRestartInFlight = false
+                    self.lastError = stderr.isEmpty ? "Core health check failed" : self.redactSensitive(stderr)
+                    self.emit(.failed)
+                    onState(.failed)
+                    self.log("manual health check failed exit=\(finished.terminationStatus)")
+                } else {
+                    self.lastError = stderr.isEmpty ? "Core health check failed" : self.redactSensitive(stderr)
+                    self.log("automatic health check failed exit=\(finished.terminationStatus)")
+                    self.scheduleAutomaticRecovery(onState: onState)
+                }
+            }
+        }
+        do {
+            try task.run()
+            lastPID = task.processIdentifier
+            log("health check started pid=\(task.processIdentifier)")
+        } catch {
+            healthCheckInFlight = false
+            process = nil
+            manualRestartInFlight = false
+            lastError = error.localizedDescription
+            emit(.failed)
+            onState(.failed)
+            log("health check spawn error: \(error.localizedDescription)")
+        }
+    }
+
+    func send(
+        prompt: String,
+        session: ChatSession,
+        approval: TaskApproval,
+        event: @escaping (RunnerEvent) -> Void
+    ) {
+        // A terminated Process object can remain assigned briefly while its
+        // termination handler drains the pipes. Treat it as reusable instead
+        // of silently dropping the next approved task.
+        guard !isRunning else { return }
+        process = nil
+        manualShutdown = false
+        generation &+= 1
+        let taskGeneration = generation
+        guard let executable = BackendLocator.wrapperURL else {
+            emit(.failed)
+            event(.failed("没有找到 Nexus 编码代理。请重新运行一键安装。"))
+            return
+        }
+
+        let task = Process()
+        task.executableURL = executable
+        stopRequested = false
+        emit(.starting, event: event)
+        // The read-only profile also disables network access on macOS. That
+        // unintentionally prevented the model request itself from reaching
+        // DeepSeek, so an “仅分析” task failed before it could read a file.
+        // Plan mode is the write guard for this path; keep the workspace
+        // sandbox so model/API traffic is available while edits remain
+        // disallowed by the runtime's plan permission mode.
+        let sandbox = "workspace"
+        // A task that the user explicitly approved is a full workspace task.
+        // `acceptEdits` still leaves unknown shell/network commands behind an
+        // interactive permission prompt. The desktop renderer has no stdin
+        // prompt loop, so those safe-but-unclassified commands would be
+        // cancelled immediately (the UI then showed only “执行失败”). Use
+        // the runtime's bypass mode for this explicit approval; the Rust
+        // policy engine and the command-line deny rules remain active, so
+        // destructive commands are still rejected before execution.
+        let permissionMode = approval == .readOnly ? "plan" : "bypassPermissions"
+        var arguments = [
+            "run",
+            "-p", prompt,
+            "--output-format", "streaming-json",
+            "--cwd", session.projectPath,
+            "--sandbox", sandbox,
+            "--permission-mode", permissionMode,
+        ]
+        if approval == .allowWorkspace {
+            arguments.append("--always-approve")
+        }
+        // Keep the existing Rust policy engine as the execution boundary, but
+        // make the high-risk deny list explicit for every desktop task. This
+        // prevents a prompt or model instruction from silently widening it.
+        arguments.append(contentsOf: NexusPolicyRules.commandLineArguments)
+        if session.backendCreated {
+            arguments.append(contentsOf: ["--resume", session.backendSessionID])
+        } else {
+            arguments.append(contentsOf: ["--session-id", session.backendSessionID])
+        }
+        task.arguments = arguments
+        task.currentDirectoryURL = URL(fileURLWithPath: session.projectPath, isDirectory: true)
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        task.standardOutput = stdout
+        task.standardError = stderr
+        stdoutBuffer = ""
+        stderrBuffer = ""
+        streamedError = ""
+        reachedEnd = false
+
+        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            self?.consumeStdout(text, event: event)
+        }
+        stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            self?.parsingQueue.async {
+                self?.stderrBuffer += text
+            }
+        }
+        task.terminationHandler = { [weak self] finished in
+            guard let self else { return }
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            let remainingOut = String(
+                data: stdout.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? ""
+            let remainingErr = String(
+                data: stderr.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? ""
+            self.parsingQueue.async {
+                if !remainingOut.isEmpty {
+                    self.stdoutBuffer += remainingOut
+                    self.flushCompleteLines(event: event, includeRemainder: true)
+                }
+                self.stderrBuffer += remainingErr
+                let didEnd = self.reachedEnd
+                let rawError = [self.streamedError, self.stderrBuffer]
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
+                let errorText = self.localizedError(rawError)
+                let sessionCollision = rawError.localizedCaseInsensitiveContains("session id")
+                    && rawError.localizedCaseInsensitiveContains("already in use")
+                DispatchQueue.main.async {
+                    // A manual shutdown or a newer task may have replaced
+                    // this Process. Its termination handler must not mutate
+                    // the current Core state or schedule another restart.
+                    guard self.generation == taskGeneration else { return }
+                    self.launchInFlight = false
+                    if self.process === finished { self.process = nil }
+                    self.lastPID = finished.processIdentifier
+                    self.lastExitCode = finished.terminationStatus
+                    if sessionCollision && !session.backendCreated {
+                        var resumed = session
+                        resumed.backendCreated = true
+                        self.send(
+                            prompt: prompt,
+                            session: resumed,
+                            approval: approval,
+                            event: event
+                        )
+                        return
+                    }
+                    if !didEnd {
+                        if self.stopRequested {
+                            self.emit(.stopped)
+                            event(.failed("任务已停止。"))
+                        } else if finished.terminationReason == .uncaughtSignal {
+                            // Signal termination is a Core disconnect even if
+                            // the child emitted stderr while being killed.
+                            // Classify it before ordinary API/tool errors.
+                            self.emit(.disconnected, event: event)
+                        } else if !errorText.isEmpty {
+                            event(.failed(errorText.isEmpty ? "Nexus 运行失败，请检查设置后重试。" : errorText))
+                        } else if finished.terminationStatus != 0 {
+                            event(.failed("Nexus 运行失败，请检查模型设置后重试。"))
+                        } else {
+                            self.emit(.ready)
+                            event(.ended(sessionID: nil))
+                        }
+                    }
+                }
+            }
+        }
+
+        // Process.run() can block while macOS resolves an executable on an
+        // external volume. Never run it on the AppKit thread: the approval
+        // dialog must close immediately and show "正在启动 Core" instead of
+        // making the whole window appear frozen.
+        launchInFlight = true
+        process = task
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                task.environment = BackendLocator.processEnvironment()
+                try task.run()
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.launchInFlight = false
+                    // The termination handler may have already cleared this
+                    // reference for a very short-lived process. Do not report
+                    // a false "ready" state after an immediate launch failure.
+                    guard task.isRunning else {
+                        if self.process === task { self.process = nil }
+                        return
+                    }
+                    if self.process == nil { self.process = task }
+                    self.lastPID = task.processIdentifier
+                    self.emit(.ready, event: event)
+                    self.stableResetWorkItem?.cancel()
+                    let reset = DispatchWorkItem { [weak self] in self?.restartAttempt = 0 }
+                    self.stableResetWorkItem = reset
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: reset)
+                }
+            } catch {
+                stdout.fileHandleForReading.readabilityHandler = nil
+                stderr.fileHandleForReading.readabilityHandler = nil
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    guard self.generation == taskGeneration else { return }
+                    self.launchInFlight = false
+                    self.process = nil
+                    self.lastError = error.localizedDescription
+                    self.emit(.failed)
+                    event(.failed("无法启动 Nexus：\(error.localizedDescription)"))
+                }
+            }
+        }
+    }
+
+    func stop() {
+        guard let task = process else { return }
+        stopRequested = true
+        guard task.isRunning else { return }
+        task.interrupt()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
+            if task.isRunning {
+                task.terminate()
+            }
+        }
+    }
+
+    private func consumeStdout(_ text: String, event: @escaping (RunnerEvent) -> Void) {
+        parsingQueue.async { [weak self] in
+            guard let self else { return }
+            self.stdoutBuffer += text
+            self.flushCompleteLines(event: event, includeRemainder: false)
+        }
+    }
+
+    private func flushCompleteLines(
+        event: @escaping (RunnerEvent) -> Void,
+        includeRemainder: Bool
+    ) {
+        var lines = stdoutBuffer.components(separatedBy: .newlines)
+        if includeRemainder {
+            stdoutBuffer = ""
+        } else {
+            stdoutBuffer = lines.removeLast()
+        }
+        for line in lines where !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            parse(line: line, event: event)
+        }
+        if includeRemainder,
+           !stdoutBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            parse(line: stdoutBuffer, event: event)
+            stdoutBuffer = ""
+        }
+    }
+
+    private func parse(line: String, event: @escaping (RunnerEvent) -> Void) {
+        guard
+            let data = line.data(using: .utf8),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let type = json["type"] as? String
+        else { return }
+
+        let callback: RunnerEvent?
+        switch type {
+        case "text":
+            callback = .text(json["data"] as? String ?? "")
+        case "thought":
+            callback = .thought(json["data"] as? String ?? "")
+        case "tool_start", "tool_update":
+            callback = .tool(
+                id: json["id"] as? String ?? UUID().uuidString,
+                title: json["title"] as? String ?? "执行工具",
+                status: json["status"] as? String ?? (type == "tool_start" ? "running" : "updated"),
+                detail: toolDetail(from: json)
+            )
+        case "plan":
+            if let value = json["data"],
+               let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted]),
+               let text = String(data: data, encoding: .utf8) {
+                callback = .plan(text)
+            } else {
+                callback = .plan("计划已更新")
+            }
+        case "end":
+            reachedEnd = true
+            callback = .ended(sessionID: json["sessionId"] as? String)
+        case "error":
+            streamedError = json["message"] as? String ?? ""
+            callback = nil
+        case "auto_compact_started":
+            callback = .thought("正在整理较长的会话…")
+        case "auto_compact_completed":
+            callback = .thought("会话整理完成，正在继续…")
+        default:
+            callback = nil
+        }
+        if let callback {
+            DispatchQueue.main.async { event(callback) }
+        }
+    }
+
+    /// Extract the human-readable failure detail from streaming-json tool
+    /// updates. The upstream format puts it in a nested `content` array; the
+    /// old parser discarded it and left the desktop with a vague “执行工具”.
+    private func toolDetail(from json: [String: Any]) -> String? {
+        for key in ["error", "message", "detail"] {
+            if let value = json[key] as? String,
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return redactSensitive(value)
+            }
+        }
+        guard let content = json["content"] as? [[String: Any]] else { return nil }
+        let texts = content.compactMap { item -> String? in
+            if let text = item["text"] as? String { return text }
+            if let nested = item["content"] as? [String: Any],
+               let text = nested["text"] as? String { return text }
+            return nil
+        }
+        let joined = texts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return joined.isEmpty ? nil : redactSensitive(joined)
+    }
+
+    private func localizedError(_ raw: String) -> String {
+        let text = redactSensitive(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        if text.isEmpty { return "" }
+        let lowered = text.lowercased()
+        if lowered.contains("reqwest error stream")
+            || lowered.contains("error sending request")
+            || lowered.contains("ssl connection")
+            || lowered.contains("connection reset")
+            || lowered.contains("connection refused")
+            || lowered.contains("could not resolve host") {
+            return "连接中转接口失败，可能是网络或 TLS 暂时不稳定，请重试。"
+        }
+        if lowered.contains("authentication required")
+            || lowered.contains("credentials were rejected")
+            || lowered.contains("unauthorized")
+            || lowered.contains("invalid api key")
+            || lowered.contains("incorrect api key")
+            || lowered.contains("401") {
+            return "DeepSeek 接口拒绝了当前密钥。请打开“设置”，更新有效密钥后重试。"
+        }
+        if lowered.contains("rate limit") || lowered.contains("429") {
+            return "请求过于频繁或账户额度不足，请稍后重试并检查 DeepSeek 账户额度。"
+        }
+        if lowered.contains("no available channel") || lowered.contains("model_not_found") {
+            return "当前接口没有可用的模型通道。请在“设置”中检查模型名称、账户额度和余额。"
+        }
+        if lowered.contains("bad_response_status_code") || lowered.contains("502") || lowered.contains("503") {
+            return "模型接口暂时无法转发请求（HTTP 502/503）。请检查模型名称、账户余额和接口协议。"
+        }
+        if lowered.contains("not found") && lowered.contains("model") {
+            return "当前模型不可用，请在“设置”中检查模型名称。"
+        }
+        if lowered.contains("timed out") || lowered.contains("timeout") {
+            return "连接接口超时，请检查网络后重试。"
+        }
+        if lowered.contains("couldn't create session") && lowered.contains("not found") {
+            return "无法恢复这个任务的代理会话，请新建任务后重试。"
+        }
+        let last = text.components(separatedBy: .newlines)
+            .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? text
+        return "Nexus 运行失败：\(last)"
+    }
+
+    private func redactSensitive(_ value: String) -> String {
+        var result = value
+        let patterns = [
+            (#"(?i)sk-[A-Za-z0-9_.*=\-]{8,}"#, "<redacted-key>"),
+            (#"(?i)xai-[A-Za-z0-9_.*=\-]{8,}"#, "<redacted-key>"),
+            (#"(?i)(bearer\s+)[A-Za-z0-9._~+\-/=]+"#, "$1<redacted-key>"),
+            (#"(?i)(api[_-]?key\s*[=:]\s*)[^\s,&]+"#, "$1<redacted-key>"),
+        ]
+        for (pattern, replacement) in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(result.startIndex..<result.endIndex, in: result)
+            result = expression.stringByReplacingMatches(
+                in: result,
+                options: [],
+                range: range,
+                withTemplate: replacement
+            )
+        }
+        return result
+    }
+}
+
+/// 兼容旧的 Controller/test 引用；生命周期实现统一在 CoreSupervisor。
+typealias NexusRunner = CoreSupervisor
+
+// MARK: - 输入框
+
+final class ComposerTextView: NSTextView {
+    var onSend: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let returnPressed = event.keyCode == 36 || event.keyCode == 76
+        if returnPressed,
+           !event.modifierFlags.contains(.shift),
+           !hasMarkedText() {
+            onSend?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
+final class ComposerView: LayerView, NSTextViewDelegate {
+    let textView = ComposerTextView()
+    let sendButton = NSButton(frame: .zero)
+    let placeholder = label("输入任务…  ⌘Enter 发送", size: 14, color: Palette.secondaryText)
+    let projectHint = label("输入任务…  ⌘Enter 发送", size: 11, color: Palette.secondaryText)
+    private let toolStack = NSStackView()
+    private let sendGradient = CAGradientLayer()
+
+    var onSend: (() -> Void)?
+    var onStop: (() -> Void)?
+    private(set) var running = false
+    private var configurationRequired = false
+
+    init() {
+        super.init(fillColor: Palette.elevated.withAlphaComponent(0.78), cornerRadius: 20, strokeColor: Palette.border)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+
+        textView.frame = NSRect(x: 0, y: 0, width: 480, height: 46)
+        textView.autoresizingMask = [.width]
+        textView.drawsBackground = false
+        textView.font = .systemFont(ofSize: 14)
+        textView.textContainerInset = NSSize(width: 2, height: 8)
+        textView.minSize = NSSize(width: 0, height: 46)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(
+            width: 480,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isRichText = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.delegate = self
+        textView.onSend = { [weak self] in self?.submit() }
+        scroll.documentView = textView
+
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+
+        sendButton.translatesAutoresizingMaskIntoConstraints = false
+        sendButton.isBordered = false
+        sendButton.image = symbol("arrow.up", size: 14, weight: .semibold)
+        sendButton.imagePosition = .imageOnly
+        sendButton.contentTintColor = .white
+        sendButton.wantsLayer = true
+        sendButton.layer?.backgroundColor = Palette.accent.cgColor
+        sendButton.layer?.cornerRadius = 17
+        sendGradient.colors = [Palette.accent.cgColor, Palette.blue.cgColor]
+        sendGradient.startPoint = CGPoint(x: 0, y: 0)
+        sendGradient.endPoint = CGPoint(x: 1, y: 1)
+        sendGradient.cornerRadius = 17
+        sendButton.layer?.addSublayer(sendGradient)
+        sendButton.target = self
+        sendButton.action = #selector(sendClicked)
+        sendButton.toolTip = "发送"
+
+        projectHint.translatesAutoresizingMaskIntoConstraints = false
+        projectHint.maximumNumberOfLines = 1
+        projectHint.lineBreakMode = .byTruncatingMiddle
+
+        addSubview(scroll)
+        addSubview(placeholder)
+        addSubview(sendButton)
+        addSubview(projectHint)
+
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 13),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -52),
+            scroll.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            scroll.heightAnchor.constraint(equalToConstant: 51),
+
+            placeholder.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            placeholder.topAnchor.constraint(equalTo: topAnchor, constant: 18),
+
+            sendButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            sendButton.topAnchor.constraint(equalTo: topAnchor, constant: 76),
+            sendButton.widthAnchor.constraint(equalToConstant: 34),
+            sendButton.heightAnchor.constraint(equalToConstant: 34),
+
+            projectHint.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 188),
+            projectHint.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -12),
+            projectHint.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 8),
+            projectHint.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -10),
+            heightAnchor.constraint(equalToConstant: 120),
+        ])
+
+        toolStack.translatesAutoresizingMaskIntoConstraints = false
+        toolStack.orientation = .horizontal
+        toolStack.spacing = 6
+        toolStack.alignment = .centerY
+        ["plus", "chevron.left.forwardslash.chevron.right", "photo", "paperclip", "mic"].forEach { imageName in
+            let button = NSButton(frame: .zero)
+            button.isBordered = false
+            button.image = symbol(imageName, size: 13, weight: .medium)
+            button.imagePosition = .imageOnly
+            button.contentTintColor = Palette.secondaryText
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 14
+            button.layer?.backgroundColor = Palette.canvas.withAlphaComponent(0.34).cgColor
+            button.layer?.borderWidth = 1
+            button.layer?.borderColor = Palette.border.withAlphaComponent(0.7).cgColor
+            button.translatesAutoresizingMaskIntoConstraints = false
+            toolStack.addArrangedSubview(button)
+            NSLayoutConstraint.activate([
+                button.widthAnchor.constraint(equalToConstant: 28),
+                button.heightAnchor.constraint(equalToConstant: 28),
+            ])
+        }
+        addSubview(toolStack)
+        NSLayoutConstraint.activate([
+            toolStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            toolStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("不支持从归档创建")
+    }
+
+    override func layout() {
+        super.layout()
+        sendGradient.frame = sendButton.bounds
+    }
+
+    var text: String {
+        get { textView.string }
+        set {
+            textView.string = newValue
+            placeholder.isHidden = !newValue.isEmpty
+        }
+    }
+
+    func textDidChange(_ notification: Notification) {
+        placeholder.isHidden = !textView.string.isEmpty
+    }
+
+    func textDidBeginEditing(_ notification: Notification) {
+        layer?.borderColor = Palette.accent.withAlphaComponent(0.72).cgColor
+        layer?.shadowColor = Palette.accent.withAlphaComponent(0.45).cgColor
+        layer?.shadowOpacity = 0.64
+        layer?.shadowRadius = 26
+    }
+
+    func textDidEndEditing(_ notification: Notification) {
+        layer?.borderColor = Palette.border.cgColor
+        layer?.shadowColor = NSColor.black.withAlphaComponent(0.52).cgColor
+        layer?.shadowOpacity = 0.42
+        layer?.shadowRadius = 18
+    }
+
+    func setRunning(_ value: Bool) {
+        running = value
+        textView.isEditable = !value && !configurationRequired
+        sendButton.isEnabled = value || !configurationRequired
+        sendButton.image = symbol(value ? "stop.fill" : "arrow.up", size: 13, weight: .semibold)
+        sendButton.toolTip = value ? "停止任务" : "发送"
+        sendButton.layer?.backgroundColor = (
+            value ? NSColor.systemRed : Palette.accent
+        ).cgColor
+    }
+
+    func setModelConfigured(_ configured: Bool) {
+        configurationRequired = !configured
+        placeholder.stringValue = configured ? "输入任务…  ⌘Enter 发送" : "请先完成模型配置"
+        placeholder.textColor = configured ? Palette.secondaryText : Palette.warning
+        textView.isEditable = configured && !running
+        sendButton.isEnabled = configured || running
+        sendButton.toolTip = configured ? (running ? "停止任务" : "发送") : "请先完成模型配置"
+        if !configured { textView.string = "" }
+        placeholder.isHidden = !textView.string.isEmpty
+    }
+
+    func focus() {
+        window?.makeFirstResponder(textView)
+    }
+
+    private func submit() {
+        if running {
+            onStop?()
+        } else if !configurationRequired,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            onSend?()
+        }
+    }
+
+    @objc private func sendClicked() {
+        submit()
+    }
+}
+
+// MARK: - 侧边栏
+
+final class SessionCellView: NSTableCellView {
+    let titleLabel = label("", size: 13, weight: .medium)
+    let detailLabel = label("", size: 11, color: Palette.secondaryText)
+    let iconView = NSImageView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.image = symbol("leaf.fill", size: 14)
+        iconView.contentTintColor = Palette.secondaryText
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        detailLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(iconView)
+        addSubview(titleLabel)
+        addSubview(detailLabel)
+
+        NSLayoutConstraint.activate([
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 11),
+            iconView.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            iconView.widthAnchor.constraint(equalToConstant: 17),
+            iconView.heightAnchor.constraint(equalToConstant: 17),
+            titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            detailLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            detailLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            detailLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 3),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("不支持从归档创建")
+    }
+}
+
+final class SessionRowView: NSTableRowView {
+    private var isHovered = false
+    private var tracking: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        needsDisplay = true
+    }
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        guard isHovered, selectionHighlightStyle == .none else { return }
+        Palette.accent.withAlphaComponent(0.06).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 2), xRadius: 7, yRadius: 7).fill()
+    }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 2), xRadius: 7, yRadius: 7)
+        Palette.selected.setFill()
+        path.fill()
+        Palette.accent.withAlphaComponent(0.72).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        Palette.accent.setFill()
+        NSBezierPath(roundedRect: NSRect(x: 6, y: 9, width: 2, height: max(12, bounds.height - 18)), xRadius: 1, yRadius: 1).fill()
+    }
+}
+
+final class SidebarView: LayerView, NSTableViewDataSource, NSTableViewDelegate {
+    let tableView = NSTableView()
+    private let searchField = NSSearchField()
+    private var allSessions: [ChatSession] = []
+    private(set) var sessions: [ChatSession] = [] {
+        didSet { tableView.reloadData() }
+    }
+    var allSessionsValue: [ChatSession] {
+        get { allSessions }
+        set {
+            allSessions = newValue
+            applySearch()
+        }
+    }
+    var onNewTask: (() -> Void)?
+    var onSelect: ((UUID) -> Void)?
+    var onSettings: (() -> Void)?
+    var onEcosystem: (() -> Void)?
+    var onDelete: ((UUID) -> Void)?
+
+    init() {
+        super.init(fillColor: Palette.sidebar, cornerRadius: 14, strokeColor: Palette.border)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let logo = LayerView(fillColor: Palette.accent.withAlphaComponent(0.14), cornerRadius: 9, strokeColor: Palette.accent.withAlphaComponent(0.6))
+        logo.translatesAutoresizingMaskIntoConstraints = false
+        let logoLeaf = NSImageView()
+        logoLeaf.translatesAutoresizingMaskIntoConstraints = false
+        logoLeaf.image = symbol("leaf.fill", size: 15, weight: .medium)
+        logoLeaf.contentTintColor = Palette.accent
+        logo.addSubview(logoLeaf)
+        logoLeaf.pinEdges(to: logo, insets: NSEdgeInsets(top: 6, left: 6, bottom: 6, right: 6))
+
+        let product = label("AI Dev One", size: 15, weight: .semibold)
+        product.translatesAutoresizingMaskIntoConstraints = false
+        let route = label("Route 2", size: 10.5, color: Palette.secondaryText)
+        route.translatesAutoresizingMaskIntoConstraints = false
+
+        let newTask = HoverButton(title: "  新建会话", target: self, action: #selector(newTaskClicked))
+        newTask.translatesAutoresizingMaskIntoConstraints = false
+        newTask.isBordered = false
+        newTask.alignment = .left
+        newTask.font = .systemFont(ofSize: 12.5, weight: .medium)
+        newTask.image = symbol("plus", size: 13, weight: .semibold)
+        newTask.imagePosition = .imageLeading
+        newTask.wantsLayer = true
+        newTask.layer?.cornerRadius = 7
+        newTask.normalColor = Palette.elevated.withAlphaComponent(0.5)
+        newTask.hoverColor = Palette.subtle
+        newTask.layer?.backgroundColor = newTask.normalColor.cgColor
+        newTask.layer?.borderWidth = 1
+        newTask.layer?.borderColor = Palette.border.cgColor
+
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchField.placeholderString = "搜索 Session  ⌘K"
+        searchField.font = .systemFont(ofSize: 12)
+        searchField.controlSize = .small
+        searchField.sendsSearchStringImmediately = true
+        searchField.target = self
+        searchField.action = #selector(searchChanged)
+
+        let section = label("SESSION", size: 10, weight: .semibold, color: Palette.secondaryText)
+        section.translatesAutoresizingMaskIntoConstraints = false
+
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("session"))
+        column.resizingMask = .autoresizingMask
+        tableView.addTableColumn(column)
+        tableView.headerView = nil
+        tableView.backgroundColor = .clear
+        tableView.selectionHighlightStyle = .regular
+        tableView.rowHeight = 54
+        tableView.intercellSpacing = NSSize(width: 0, height: 1)
+        tableView.delegate = self
+        tableView.dataSource = self
+        tableView.target = self
+        tableView.action = #selector(selectionChanged)
+        tableView.menu = makeContextMenu()
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = tableView
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+
+        let settings = HoverButton(title: "  设置", target: self, action: #selector(settingsClicked))
+        settings.translatesAutoresizingMaskIntoConstraints = false
+        settings.isBordered = false
+        settings.alignment = .left
+        settings.font = .systemFont(ofSize: 13)
+        settings.image = symbol("gearshape", size: 14)
+        settings.imagePosition = .imageLeading
+        settings.wantsLayer = true
+        settings.layer?.cornerRadius = 7
+        settings.hoverColor = Palette.subtle
+
+        let ecosystem = HoverButton(title: "  生态与工具", target: self, action: #selector(ecosystemClicked))
+        ecosystem.translatesAutoresizingMaskIntoConstraints = false
+        ecosystem.isBordered = false
+        ecosystem.alignment = .left
+        ecosystem.font = .systemFont(ofSize: 13)
+        ecosystem.image = symbol("puzzlepiece.extension", size: 14)
+        ecosystem.imagePosition = .imageLeading
+        ecosystem.wantsLayer = true
+        ecosystem.layer?.cornerRadius = 7
+        ecosystem.hoverColor = Palette.subtle
+
+        addSubview(logo)
+        addSubview(product)
+        addSubview(route)
+        addSubview(newTask)
+        addSubview(searchField)
+        addSubview(section)
+        addSubview(scroll)
+        addSubview(ecosystem)
+        addSubview(settings)
+
+        NSLayoutConstraint.activate([
+            logo.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            logo.topAnchor.constraint(equalTo: topAnchor, constant: 15),
+            logo.widthAnchor.constraint(equalToConstant: 28),
+            logo.heightAnchor.constraint(equalToConstant: 28),
+            product.leadingAnchor.constraint(equalTo: logo.trailingAnchor, constant: 9),
+            product.topAnchor.constraint(equalTo: logo.topAnchor, constant: 1),
+            route.leadingAnchor.constraint(equalTo: product.leadingAnchor),
+            route.topAnchor.constraint(equalTo: product.bottomAnchor, constant: 2),
+
+            newTask.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            newTask.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            newTask.topAnchor.constraint(equalTo: logo.bottomAnchor, constant: 16),
+            newTask.heightAnchor.constraint(equalToConstant: 34),
+
+            searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            searchField.topAnchor.constraint(equalTo: newTask.bottomAnchor, constant: 7),
+            searchField.heightAnchor.constraint(equalToConstant: 26),
+
+            section.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 17),
+            section.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 14),
+
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            scroll.topAnchor.constraint(equalTo: section.bottomAnchor, constant: 7),
+            scroll.bottomAnchor.constraint(equalTo: ecosystem.topAnchor, constant: -8),
+
+            ecosystem.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            ecosystem.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            ecosystem.bottomAnchor.constraint(equalTo: settings.topAnchor, constant: -3),
+            ecosystem.heightAnchor.constraint(equalToConstant: 34),
+
+            settings.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            settings.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            settings.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            settings.heightAnchor.constraint(equalToConstant: 34),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("不支持从归档创建")
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        sessions.count
+    }
+
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        SessionRowView()
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let cell = SessionCellView()
+        let session = sessions[row]
+        cell.titleLabel.stringValue = session.title
+        cell.detailLabel.stringValue = URL(fileURLWithPath: session.projectPath).lastPathComponent
+        cell.titleLabel.maximumNumberOfLines = 1
+        cell.detailLabel.maximumNumberOfLines = 1
+        return cell
+    }
+
+    func select(id: UUID?) {
+        guard let id, let index = sessions.firstIndex(where: { $0.id == id }) else {
+            tableView.deselectAll(nil)
+            return
+        }
+        tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        tableView.scrollRowToVisible(index)
+    }
+
+    func clearSearch() {
+        guard !searchField.stringValue.isEmpty else { return }
+        searchField.stringValue = ""
+        applySearch()
+    }
+
+    @objc private func newTaskClicked() {
+        onNewTask?()
+    }
+
+    @objc private func searchChanged() {
+        applySearch()
+    }
+
+    private func applySearch() {
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if query.isEmpty {
+            sessions = allSessions
+            return
+        }
+        sessions = allSessions.filter { session in
+            let searchable = [
+                session.title,
+                URL(fileURLWithPath: session.projectPath).lastPathComponent,
+                session.projectPath,
+                session.messages.last?.content ?? "",
+            ]
+            return searchable.contains { $0.localizedCaseInsensitiveContains(query) }
+        }
+    }
+
+    @objc private func selectionChanged() {
+        let row = tableView.selectedRow
+        guard sessions.indices.contains(row) else { return }
+        onSelect?(sessions[row].id)
+    }
+
+    @objc private func settingsClicked() {
+        onSettings?()
+    }
+
+    @objc private func ecosystemClicked() {
+        onEcosystem?()
+    }
+
+    private func makeContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        let item = NSMenuItem(title: "删除任务", action: #selector(deleteSelected), keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc private func deleteSelected() {
+        let clicked = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
+        guard sessions.indices.contains(clicked) else { return }
+        onDelete?(sessions[clicked].id)
+    }
+}
+
+// MARK: - Agent 时间线与对话内容
+
+final class AgentTimelineView: LayerView {
+    private var cards: [(container: LayerView, dot: NSTextField, title: NSTextField, detail: NSTextField)] = []
+    private var lastActiveIndex = 0
+
+    init() {
+        super.init(fillColor: Palette.elevated.withAlphaComponent(0.24), cornerRadius: 12, strokeColor: Palette.border.withAlphaComponent(0.70))
+        translatesAutoresizingMaskIntoConstraints = false
+        let stack = NSStackView()
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .horizontal
+        stack.spacing = 6
+        stack.distribution = .fillEqually
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+        ])
+
+        [("Architect", "Planning architecture", Palette.accent),
+         ("Builder", "Editing project", Palette.violet),
+         ("Verifier", "Running tests", Palette.success),
+         ("Reviewer", "Code review", Palette.blue)]
+            .forEach { titleText, detailText, color in
+                let card = LayerView(fillColor: Palette.canvas.withAlphaComponent(0.28), cornerRadius: 9, strokeColor: Palette.border.withAlphaComponent(0.40))
+                let dot = label("●", size: 9, weight: .bold, color: color.withAlphaComponent(0.58))
+                let title = label(titleText, size: 10.5, weight: .semibold, color: NSColor(calibratedWhite: 0.90, alpha: 0.88))
+                let detail = label(detailText, size: 9, color: Palette.secondaryText)
+                [dot, title, detail].forEach {
+                    $0.translatesAutoresizingMaskIntoConstraints = false
+                    card.addSubview($0)
+                }
+                NSLayoutConstraint.activate([
+                    dot.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 8),
+                    dot.topAnchor.constraint(equalTo: card.topAnchor, constant: 8),
+                    dot.widthAnchor.constraint(equalToConstant: 10),
+                    title.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 5),
+                    title.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -6),
+                    title.topAnchor.constraint(equalTo: card.topAnchor, constant: 6),
+                    detail.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+                    detail.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -6),
+                    detail.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
+                ])
+                stack.addArrangedSubview(card)
+                cards.append((card, dot, title, detail))
+            }
+        setStage("Idle")
+    }
+
+    required init?(coder: NSCoder) { fatalError("不支持从归档创建") }
+
+    func setStage(_ stage: String) {
+        let lowered = stage.lowercased()
+        let completedAll = lowered.contains("completed") || lowered.contains("完成")
+        let activeIndex: Int
+        if lowered.contains("architect") || lowered.contains("plan") || lowered.contains("think") { activeIndex = 0 }
+        else if lowered.contains("builder") || lowered.contains("edit") { activeIndex = 1 }
+        else if lowered.contains("verif") || lowered.contains("test") || lowered.contains("run") { activeIndex = 2 }
+        else if lowered.contains("review") || lowered.contains("read") || lowered.contains("search") { activeIndex = 3 }
+        else { activeIndex = -1 }
+        if activeIndex >= 0 { lastActiveIndex = activeIndex }
+        updateCards(activeIndex: activeIndex, completedAll: completedAll, failed: false)
+    }
+
+    func setFailure() {
+        updateCards(activeIndex: lastActiveIndex, completedAll: false, failed: true)
+    }
+
+    private func updateCards(activeIndex: Int, completedAll: Bool, failed: Bool) {
+        let runningDetails = [
+            "Planning architecture",
+            "Editing project",
+            "Running tests",
+            "Code review",
+        ]
+
+        for (index, card) in cards.enumerated() {
+            let failedCard = failed && index == activeIndex
+            let active = !failed && index == activeIndex
+            let completed = !failed && (completedAll || (activeIndex >= 0 && index < activeIndex))
+            card.container.fillColor = failedCard
+                ? Palette.error.withAlphaComponent(0.12)
+                : active
+                ? Palette.selected.withAlphaComponent(0.72)
+                : completed ? Palette.success.withAlphaComponent(0.11)
+                : Palette.canvas.withAlphaComponent(0.22)
+            card.container.strokeColor = failedCard
+                ? Palette.error.withAlphaComponent(0.55)
+                : active
+                ? Palette.accent.withAlphaComponent(0.62)
+                : completed ? Palette.success.withAlphaComponent(0.40)
+                : Palette.border.withAlphaComponent(0.34)
+            card.container.layer?.shadowColor = failedCard ? Palette.error.cgColor : active ? Palette.accent.cgColor : Palette.success.cgColor
+            card.container.layer?.shadowOpacity = failedCard ? 0.18 : active ? 0.22 : (completed ? 0.08 : 0)
+            card.container.layer?.shadowRadius = failedCard || active ? 12 : 6
+            card.dot.textColor = failedCard ? Palette.error : active ? Palette.accent : completed ? Palette.success : Palette.secondaryText.withAlphaComponent(0.50)
+            card.title.textColor = failedCard || active || completed ? NSColor(calibratedWhite: 0.95, alpha: 1) : NSColor(calibratedWhite: 0.82, alpha: 0.78)
+            card.detail.stringValue = failedCard ? "Failed" : completed ? "Completed" : active ? runningDetails[index] : "Waiting"
+            card.detail.textColor = failedCard ? Palette.error.withAlphaComponent(0.90) : active ? Palette.accent.withAlphaComponent(0.90) : completed ? Palette.success.withAlphaComponent(0.85) : Palette.secondaryText.withAlphaComponent(0.70)
+        }
+    }
+}
+
+final class ChatContentView: LayerView {
+    let headerTitle = label("新任务", size: 17, weight: .semibold, color: NSColor(calibratedWhite: 0.95, alpha: 1))
+    let projectButton = HoverButton(frame: .zero)
+    let statusLabel = label("○ Agent Idle", size: 11, weight: .medium, color: Palette.secondaryText)
+    let changesButton = HoverButton(frame: .zero)
+    let terminalButton = HoverButton(frame: .zero)
+    let composer = ComposerView()
+    let timeline = AgentTimelineView()
+
+    private let messageStack = NSStackView()
+    private let scrollView = NSScrollView()
+    private let scrollDocument = LayerView(fillColor: .clear)
+    private var activeAssistantLabel: NSTextField?
+    private var emptyState: NSView?
+
+    var onProject: (() -> Void)?
+    var onShowWorkspace: ((Int) -> Void)?
+    var onOpenSettings: (() -> Void)?
+    var onRetry: (() -> Void)?
+
+    init() {
+        super.init(fillColor: Palette.canvas.withAlphaComponent(0.32), cornerRadius: 14, strokeColor: Palette.border)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let header = LayerView(fillColor: Palette.elevated.withAlphaComponent(0.30))
+        header.translatesAutoresizingMaskIntoConstraints = false
+        headerTitle.translatesAutoresizingMaskIntoConstraints = false
+
+        projectButton.translatesAutoresizingMaskIntoConstraints = false
+        projectButton.isBordered = false
+        projectButton.font = .systemFont(ofSize: 11)
+        projectButton.contentTintColor = Palette.secondaryText
+        projectButton.image = symbol("folder", size: 11)
+        projectButton.imagePosition = .imageLeading
+        projectButton.wantsLayer = true
+        projectButton.layer?.cornerRadius = 6
+        projectButton.hoverColor = Palette.subtle
+        projectButton.target = self
+        projectButton.action = #selector(projectClicked)
+
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        configureHeaderButton(
+            changesButton,
+            title: " 编辑",
+            image: "pencil",
+            action: #selector(showChanges)
+        )
+        configureHeaderButton(
+            terminalButton,
+            title: " 更多",
+            image: "ellipsis",
+            action: #selector(showTerminal)
+        )
+
+        let separator = LayerView(fillColor: Palette.border)
+        separator.translatesAutoresizingMaskIntoConstraints = false
+
+        header.addSubview(headerTitle)
+        header.addSubview(projectButton)
+        header.addSubview(changesButton)
+        header.addSubview(terminalButton)
+        header.addSubview(statusLabel)
+        header.addSubview(separator)
+
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        scrollDocument.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = scrollDocument
+
+        messageStack.translatesAutoresizingMaskIntoConstraints = false
+        messageStack.orientation = .vertical
+        messageStack.alignment = .centerX
+        messageStack.spacing = 18
+        messageStack.distribution = .gravityAreas
+        scrollDocument.addSubview(messageStack)
+
+        composer.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(header)
+        addSubview(timeline)
+        addSubview(scrollView)
+        addSubview(composer)
+
+        NSLayoutConstraint.activate([
+            header.leadingAnchor.constraint(equalTo: leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: trailingAnchor),
+            header.topAnchor.constraint(equalTo: topAnchor),
+            header.heightAnchor.constraint(equalToConstant: 72),
+            headerTitle.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 22),
+            headerTitle.trailingAnchor.constraint(lessThanOrEqualTo: changesButton.leadingAnchor, constant: -14),
+            headerTitle.topAnchor.constraint(equalTo: header.topAnchor, constant: 14),
+            projectButton.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 17),
+            projectButton.trailingAnchor.constraint(lessThanOrEqualTo: changesButton.leadingAnchor, constant: -14),
+            projectButton.topAnchor.constraint(equalTo: headerTitle.bottomAnchor, constant: 1),
+            projectButton.heightAnchor.constraint(equalToConstant: 20),
+            statusLabel.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -22),
+            statusLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            terminalButton.trailingAnchor.constraint(equalTo: statusLabel.leadingAnchor, constant: -15),
+            terminalButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            terminalButton.widthAnchor.constraint(equalToConstant: 58),
+            terminalButton.heightAnchor.constraint(equalToConstant: 28),
+            changesButton.trailingAnchor.constraint(equalTo: terminalButton.leadingAnchor, constant: -3),
+            changesButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            changesButton.widthAnchor.constraint(equalToConstant: 58),
+            changesButton.heightAnchor.constraint(equalToConstant: 28),
+            separator.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 1),
+
+            timeline.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            timeline.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            timeline.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10),
+            timeline.heightAnchor.constraint(equalToConstant: 50),
+
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: timeline.bottomAnchor, constant: 10),
+            scrollView.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -18),
+
+            scrollDocument.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            scrollDocument.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            scrollDocument.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            scrollDocument.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
+            scrollDocument.heightAnchor.constraint(greaterThanOrEqualTo: scrollView.heightAnchor),
+
+            messageStack.leadingAnchor.constraint(equalTo: scrollDocument.leadingAnchor, constant: 34),
+            messageStack.trailingAnchor.constraint(equalTo: scrollDocument.trailingAnchor, constant: -34),
+            messageStack.topAnchor.constraint(equalTo: scrollDocument.topAnchor, constant: 28),
+            messageStack.bottomAnchor.constraint(equalTo: scrollDocument.bottomAnchor, constant: -28),
+
+            composer.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 40),
+            composer.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -40),
+            composer.centerXAnchor.constraint(equalTo: centerXAnchor),
+            composer.widthAnchor.constraint(lessThanOrEqualToConstant: 720),
+            composer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -18),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("不支持从归档创建")
+    }
+
+    func display(session: ChatSession, streamingMessageID: UUID? = nil) {
+        headerTitle.stringValue = session.title
+        let folder = URL(fileURLWithPath: session.projectPath).lastPathComponent
+        projectButton.title = "  \(folder)"
+        projectButton.toolTip = session.projectPath
+        composer.projectHint.stringValue = "当前项目：\(session.projectPath)"
+        composer.projectHint.toolTip = session.projectPath
+        activeAssistantLabel = nil
+        clearMessages()
+
+        if session.messages.isEmpty {
+            showEmptyState(projectName: folder)
+        } else {
+            for message in session.messages {
+                addMessage(message, isStreaming: message.id == streamingMessageID)
+            }
+            scrollToBottom(animated: false)
+        }
+    }
+
+    func setStatus(_ text: String, color: NSColor) {
+        statusLabel.stringValue = text
+        statusLabel.textColor = color
+    }
+
+    func setAgentStage(_ stage: String) {
+        if stage.lowercased().contains("fail") || stage.contains("失败") {
+            timeline.setFailure()
+        } else {
+            timeline.setStage(stage)
+        }
+    }
+
+    func addMessage(_ message: ChatMessage, isStreaming: Bool = false) {
+        removeEmptyState()
+        let row = LayerView(fillColor: .clear)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        let bubble: LayerView
+        let textField = NSTextField(wrappingLabelWithString: message.content)
+        textField.translatesAutoresizingMaskIntoConstraints = false
+        textField.font = message.role == .system
+            ? .systemFont(ofSize: 12)
+            : .systemFont(ofSize: 14)
+        textField.textColor = message.role == .system ? Palette.warning : NSColor(calibratedWhite: 0.9, alpha: 0.95)
+        textField.isSelectable = true
+        textField.maximumNumberOfLines = 0
+        textField.lineBreakMode = .byWordWrapping
+        textField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        switch message.role {
+        case .user:
+            bubble = LayerView(fillColor: Palette.accent.withAlphaComponent(0.16), cornerRadius: 14, strokeColor: Palette.accent.withAlphaComponent(0.2))
+            bubble.addSubview(textField)
+            row.addSubview(bubble)
+            bubble.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                bubble.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+                bubble.topAnchor.constraint(equalTo: row.topAnchor),
+                bubble.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+                bubble.widthAnchor.constraint(lessThanOrEqualTo: row.widthAnchor, multiplier: 0.76),
+                textField.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 14),
+                textField.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -14),
+                textField.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 10),
+                textField.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -10),
+            ])
+        case .assistant:
+            bubble = LayerView(fillColor: .clear)
+            let avatar = LayerView(fillColor: Palette.accent.withAlphaComponent(0.13), cornerRadius: 16, strokeColor: Palette.accent.withAlphaComponent(0.7))
+            avatar.translatesAutoresizingMaskIntoConstraints = false
+            let avatarIcon = NSImageView()
+            avatarIcon.translatesAutoresizingMaskIntoConstraints = false
+            avatarIcon.image = symbol("leaf.fill", size: 14, weight: .medium)
+            avatarIcon.contentTintColor = Palette.accent
+            avatar.addSubview(avatarIcon)
+            avatarIcon.pinEdges(to: avatar, insets: NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8))
+            bubble.addSubview(avatar)
+            bubble.addSubview(textField)
+            row.addSubview(bubble)
+            bubble.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                bubble.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+                bubble.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -24),
+                bubble.topAnchor.constraint(equalTo: row.topAnchor),
+                bubble.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+                avatar.leadingAnchor.constraint(equalTo: bubble.leadingAnchor),
+                avatar.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 1),
+                avatar.widthAnchor.constraint(equalToConstant: 25),
+                avatar.heightAnchor.constraint(equalToConstant: 25),
+                textField.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: 12),
+                textField.trailingAnchor.constraint(equalTo: bubble.trailingAnchor),
+                textField.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 3),
+                textField.bottomAnchor.constraint(equalTo: bubble.bottomAnchor),
+            ])
+            if isStreaming {
+                activeAssistantLabel = textField
+                if textField.stringValue.isEmpty {
+                    textField.stringValue = "Thinking…"
+                }
+            }
+        case .system:
+            if message.content.localizedCaseInsensitiveContains("密钥")
+                || message.content.localizedCaseInsensitiveContains("api key")
+                || message.content.localizedCaseInsensitiveContains("配置") {
+                textField.stringValue = "API 配置异常\n" + message.content
+            }
+            textField.maximumNumberOfLines = 3
+            textField.lineBreakMode = .byTruncatingTail
+            bubble = LayerView(fillColor: Palette.error.withAlphaComponent(0.08), cornerRadius: 11, strokeColor: Palette.error.withAlphaComponent(0.20))
+            row.addSubview(bubble)
+            bubble.translatesAutoresizingMaskIntoConstraints = false
+            let actionStack = NSStackView()
+            actionStack.translatesAutoresizingMaskIntoConstraints = false
+            actionStack.orientation = .horizontal
+            actionStack.spacing = 8
+            let settingsButton = NSButton(title: "打开模型设置", target: self, action: #selector(openErrorSettings))
+            settingsButton.bezelStyle = .texturedRounded
+            settingsButton.font = .systemFont(ofSize: 11, weight: .medium)
+            settingsButton.contentTintColor = Palette.accent
+            settingsButton.toolTip = "打开设置更新模型和 API Key"
+            let retryButton = NSButton(title: "重新连接", target: self, action: #selector(retryError))
+            retryButton.bezelStyle = .texturedRounded
+            retryButton.font = .systemFont(ofSize: 11, weight: .medium)
+            retryButton.contentTintColor = Palette.secondaryText
+            actionStack.addArrangedSubview(settingsButton)
+            actionStack.addArrangedSubview(retryButton)
+            let systemStack = NSStackView(views: [textField, actionStack])
+            systemStack.translatesAutoresizingMaskIntoConstraints = false
+            systemStack.orientation = .vertical
+            systemStack.alignment = .leading
+            systemStack.spacing = 5
+            bubble.addSubview(systemStack)
+            NSLayoutConstraint.activate([
+                bubble.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+                bubble.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+                bubble.topAnchor.constraint(equalTo: row.topAnchor),
+                bubble.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+                systemStack.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 13),
+                systemStack.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -13),
+                systemStack.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 7),
+                systemStack.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -7),
+            ])
+        case .tool:
+            bubble = LayerView(fillColor: Palette.elevated.withAlphaComponent(0.62), cornerRadius: 11, strokeColor: Palette.border)
+            let toolIcon = NSImageView()
+            toolIcon.translatesAutoresizingMaskIntoConstraints = false
+            toolIcon.image = symbol("hammer", size: 13)
+            toolIcon.contentTintColor = Palette.secondaryText
+            bubble.addSubview(toolIcon)
+            bubble.addSubview(textField)
+            row.addSubview(bubble)
+            bubble.translatesAutoresizingMaskIntoConstraints = false
+            textField.font = .systemFont(ofSize: 12, weight: .medium)
+            textField.textColor = Palette.secondaryText
+            NSLayoutConstraint.activate([
+                bubble.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 36),
+                bubble.trailingAnchor.constraint(lessThanOrEqualTo: row.trailingAnchor),
+                bubble.topAnchor.constraint(equalTo: row.topAnchor),
+                bubble.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+                toolIcon.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 11),
+                toolIcon.centerYAnchor.constraint(equalTo: bubble.centerYAnchor),
+                toolIcon.widthAnchor.constraint(equalToConstant: 16),
+                toolIcon.heightAnchor.constraint(equalToConstant: 16),
+                textField.leadingAnchor.constraint(equalTo: toolIcon.trailingAnchor, constant: 7),
+                textField.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -12),
+                textField.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 8),
+                textField.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -8),
+            ])
+        }
+
+        messageStack.addArrangedSubview(row)
+        row.widthAnchor.constraint(equalTo: messageStack.widthAnchor).isActive = true
+        scrollToBottom(animated: true)
+    }
+
+    func updateStreamingText(_ text: String) {
+        activeAssistantLabel?.stringValue = text.isEmpty ? "Thinking…" : text
+        activeAssistantLabel?.invalidateIntrinsicContentSize()
+        scrollToBottom(animated: false)
+    }
+
+    func finishStreaming() {
+        activeAssistantLabel = nil
+    }
+
+    private func showEmptyState(projectName: String) {
+        let container = LayerView(fillColor: .clear)
+        container.translatesAutoresizingMaskIntoConstraints = false
+        let icon = LayerView(fillColor: Palette.accent, cornerRadius: 15)
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        let iconView = NSImageView()
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.image = symbol("leaf.fill", size: 22, weight: .medium)
+        iconView.contentTintColor = Palette.accent
+        icon.addSubview(iconView)
+        iconView.pinEdges(to: icon, insets: NSEdgeInsets(top: 13, left: 13, bottom: 13, right: 13))
+
+        let title = label("准备好一起构建了吗？", size: 22, weight: .semibold)
+        title.translatesAutoresizingMaskIntoConstraints = false
+        let subtitle = label(
+            "描述你想在“\(projectName)”中完成的任务，AI Dev One 会阅读代码、编辑文件并运行命令。",
+            size: 13,
+            color: Palette.secondaryText
+        )
+        subtitle.translatesAutoresizingMaskIntoConstraints = false
+        subtitle.alignment = .center
+        subtitle.maximumNumberOfLines = 0
+        subtitle.lineBreakMode = .byWordWrapping
+
+        container.addSubview(icon)
+        container.addSubview(title)
+        container.addSubview(subtitle)
+        messageStack.addArrangedSubview(container)
+        container.widthAnchor.constraint(equalTo: messageStack.widthAnchor).isActive = true
+        container.heightAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
+        NSLayoutConstraint.activate([
+            icon.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            icon.topAnchor.constraint(equalTo: container.topAnchor, constant: 55),
+            icon.widthAnchor.constraint(equalToConstant: 50),
+            icon.heightAnchor.constraint(equalToConstant: 50),
+            title.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            title.topAnchor.constraint(equalTo: icon.bottomAnchor, constant: 19),
+            subtitle.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 10),
+            subtitle.widthAnchor.constraint(lessThanOrEqualToConstant: 500),
+        ])
+        emptyState = container
+    }
+
+    private func clearMessages() {
+        messageStack.arrangedSubviews.forEach {
+            messageStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        emptyState = nil
+    }
+
+    private func removeEmptyState() {
+        guard let emptyState else { return }
+        messageStack.removeArrangedSubview(emptyState)
+        emptyState.removeFromSuperview()
+        self.emptyState = nil
+    }
+
+    private func scrollToBottom(animated: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.scrollDocument.layoutSubtreeIfNeeded()
+            let maxY = max(0, self.scrollDocument.bounds.height - self.scrollView.contentView.bounds.height)
+            let point = NSPoint(x: 0, y: maxY)
+            if animated {
+                self.scrollView.contentView.animator().setBoundsOrigin(point)
+            } else {
+                self.scrollView.contentView.setBoundsOrigin(point)
+            }
+            self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
+        }
+    }
+
+    @objc private func projectClicked() {
+        onProject?()
+    }
+
+    private func configureHeaderButton(
+        _ button: HoverButton,
+        title: String,
+        image: String,
+        action: Selector
+    ) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.isBordered = false
+        button.title = title
+        button.font = .systemFont(ofSize: 11, weight: .medium)
+        button.image = symbol(image, size: 12)
+        button.imagePosition = .imageLeading
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 6
+        button.hoverColor = Palette.subtle
+        button.target = self
+        button.action = action
+    }
+
+    @objc private func showChanges() {
+        onShowWorkspace?(0)
+    }
+
+    @objc private func showTerminal() {
+        onShowWorkspace?(3)
+    }
+
+    @objc private func openErrorSettings() {
+        onOpenSettings?()
+    }
+
+    @objc private func retryError() {
+        onRetry?()
+    }
+}
+
+// MARK: - 工作区面板
+
+final class WorkspacePanelView: LayerView {
+    private let segmented = NSSegmentedControl(
+        labels: ["工作区", "文件", "知识库", "工具"],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
+    private let projectName = label("AI Dev One Route 2", size: 13, weight: .medium)
+    private let projectPathLabel = label("~/Projects/ai-dev-one-route2", size: 10.5, color: Palette.secondaryText)
+    private let statsStack = NSStackView()
+    private let recentTitle = label("最近变更", size: 11, weight: .semibold, color: Palette.secondaryText)
+    private var statValueLabels: [NSTextField] = []
+    private let outputView = NSTextView()
+    private let commandField = NSTextField()
+    private let actionButton = NSButton(title: "刷新", target: nil, action: nil)
+    private let summaryLabel = label("", size: 11, color: Palette.secondaryText)
+    private var runningProcess: Process?
+
+    var projectPath: String = "" {
+        didSet {
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            projectPathLabel.stringValue = projectPath.hasPrefix(home)
+                ? "~" + String(projectPath.dropFirst(home.count))
+                : projectPath
+            projectPathLabel.toolTip = projectPath
+            projectName.toolTip = projectPath
+            projectName.stringValue = URL(fileURLWithPath: projectPath).lastPathComponent.isEmpty
+                ? "AI Dev One Route 2"
+                : URL(fileURLWithPath: projectPath).lastPathComponent
+            if !isHidden {
+                refresh()
+            }
+            updateProjectStats()
+        }
+    }
+    var onClose: (() -> Void)?
+
+    init() {
+        super.init(fillColor: Palette.elevated.withAlphaComponent(0.38), cornerRadius: 14, strokeColor: Palette.border.withAlphaComponent(0.72))
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let title = label("工作区", size: 14, weight: .semibold)
+        title.translatesAutoresizingMaskIntoConstraints = false
+        let close = HoverButton(frame: .zero)
+        close.translatesAutoresizingMaskIntoConstraints = false
+        close.isBordered = false
+        close.image = symbol("xmark", size: 12, weight: .semibold)
+        close.imagePosition = .imageOnly
+        close.wantsLayer = true
+        close.layer?.cornerRadius = 6
+        close.hoverColor = Palette.subtle
+        close.target = self
+        close.action = #selector(closePanel)
+        close.toolTip = "关闭工作区面板"
+
+        segmented.translatesAutoresizingMaskIntoConstraints = false
+        segmented.selectedSegment = 0
+        segmented.target = self
+        segmented.action = #selector(segmentChanged)
+
+        let projectCard = LayerView(fillColor: Palette.canvas.withAlphaComponent(0.42), cornerRadius: 12, strokeColor: Palette.border.withAlphaComponent(0.72))
+        projectCard.translatesAutoresizingMaskIntoConstraints = false
+        let folder = NSImageView()
+        folder.translatesAutoresizingMaskIntoConstraints = false
+        folder.image = symbol("folder", size: 15, weight: .medium)
+        folder.contentTintColor = Palette.accent
+        projectName.translatesAutoresizingMaskIntoConstraints = false
+        projectPathLabel.translatesAutoresizingMaskIntoConstraints = false
+        projectPathLabel.lineBreakMode = .byTruncatingMiddle
+        let projectChevron = NSImageView()
+        projectChevron.translatesAutoresizingMaskIntoConstraints = false
+        projectChevron.image = symbol("chevron.down", size: 10, weight: .semibold)
+        projectChevron.contentTintColor = Palette.secondaryText
+        let projectStatus = label("● Ready", size: 9.5, weight: .medium, color: Palette.success)
+        projectStatus.translatesAutoresizingMaskIntoConstraints = false
+        [folder, projectName, projectPathLabel, projectStatus, projectChevron].forEach(projectCard.addSubview)
+        NSLayoutConstraint.activate([
+            folder.leadingAnchor.constraint(equalTo: projectCard.leadingAnchor, constant: 12),
+            folder.centerYAnchor.constraint(equalTo: projectCard.centerYAnchor),
+            folder.widthAnchor.constraint(equalToConstant: 22),
+            folder.heightAnchor.constraint(equalToConstant: 22),
+            projectName.leadingAnchor.constraint(equalTo: folder.trailingAnchor, constant: 10),
+            projectName.topAnchor.constraint(equalTo: projectCard.topAnchor, constant: 10),
+            projectName.trailingAnchor.constraint(lessThanOrEqualTo: projectStatus.leadingAnchor, constant: -8),
+            projectPathLabel.leadingAnchor.constraint(equalTo: projectName.leadingAnchor),
+            projectPathLabel.topAnchor.constraint(equalTo: projectName.bottomAnchor, constant: 3),
+            projectPathLabel.trailingAnchor.constraint(lessThanOrEqualTo: projectStatus.leadingAnchor, constant: -8),
+            projectStatus.trailingAnchor.constraint(equalTo: projectChevron.leadingAnchor, constant: -10),
+            projectStatus.centerYAnchor.constraint(equalTo: projectCard.centerYAnchor),
+            projectChevron.trailingAnchor.constraint(equalTo: projectCard.trailingAnchor, constant: -12),
+            projectChevron.centerYAnchor.constraint(equalTo: projectCard.centerYAnchor),
+            projectChevron.widthAnchor.constraint(equalToConstant: 14),
+            projectChevron.heightAnchor.constraint(equalToConstant: 14),
+        ])
+
+        statsStack.translatesAutoresizingMaskIntoConstraints = false
+        statsStack.orientation = .horizontal
+        statsStack.spacing = 6
+        statsStack.distribution = .fillEqually
+        [("代码", "—", Palette.accent), ("测试", "—", Palette.blue),
+         ("文档", "—", Palette.violet), ("变更", "—", NSColor(calibratedWhite: 0.9, alpha: 1))]
+            .forEach { statTitle, value, color in
+                let card = LayerView(fillColor: Palette.canvas.withAlphaComponent(0.30), cornerRadius: 9, strokeColor: Palette.border.withAlphaComponent(0.58))
+                let valueLabel = label(value, size: 15, weight: .semibold, color: color)
+                let titleLabel = label(statTitle, size: 9.5, color: Palette.secondaryText)
+                [valueLabel, titleLabel].forEach {
+                    $0.translatesAutoresizingMaskIntoConstraints = false
+                    card.addSubview($0)
+                }
+                NSLayoutConstraint.activate([
+                    valueLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 9),
+                    valueLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: 7),
+                    titleLabel.leadingAnchor.constraint(equalTo: valueLabel.leadingAnchor),
+                    titleLabel.topAnchor.constraint(equalTo: valueLabel.bottomAnchor, constant: 1),
+                    titleLabel.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -6),
+                ])
+                statValueLabels.append(valueLabel)
+                statsStack.addArrangedSubview(card)
+            }
+
+        summaryLabel.translatesAutoresizingMaskIntoConstraints = false
+        recentTitle.translatesAutoresizingMaskIntoConstraints = false
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.horizontalScrollElasticity = .none
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+
+        outputView.frame = NSRect(x: 0, y: 0, width: 360, height: 580)
+        outputView.autoresizingMask = [.width]
+        outputView.drawsBackground = false
+        outputView.isEditable = false
+        outputView.isSelectable = true
+        outputView.isRichText = true
+        outputView.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        outputView.textContainerInset = NSSize(width: 12, height: 12)
+        outputView.textContainer?.widthTracksTextView = true
+        outputView.isHorizontallyResizable = false
+        outputView.isVerticallyResizable = true
+        scroll.documentView = outputView
+
+        commandField.translatesAutoresizingMaskIntoConstraints = false
+        commandField.placeholderString = "输入命令后按回车运行"
+        commandField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        commandField.target = self
+        commandField.action = #selector(primaryAction)
+        commandField.isHidden = true
+
+        actionButton.translatesAutoresizingMaskIntoConstraints = false
+        actionButton.bezelStyle = .rounded
+        actionButton.target = self
+        actionButton.action = #selector(primaryAction)
+
+        let separator = LayerView(fillColor: Palette.border)
+        separator.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(title)
+        addSubview(close)
+        addSubview(segmented)
+        addSubview(projectCard)
+        addSubview(statsStack)
+        addSubview(recentTitle)
+        addSubview(summaryLabel)
+        addSubview(separator)
+        addSubview(scroll)
+        addSubview(commandField)
+        addSubview(actionButton)
+
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            title.topAnchor.constraint(equalTo: topAnchor, constant: 17),
+            close.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            close.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            close.widthAnchor.constraint(equalToConstant: 26),
+            close.heightAnchor.constraint(equalToConstant: 26),
+
+            segmented.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            segmented.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            segmented.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 15),
+            segmented.heightAnchor.constraint(equalToConstant: 30),
+
+            projectCard.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            projectCard.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            projectCard.topAnchor.constraint(equalTo: segmented.bottomAnchor, constant: 13),
+            projectCard.heightAnchor.constraint(equalToConstant: 54),
+
+            statsStack.leadingAnchor.constraint(equalTo: projectCard.leadingAnchor),
+            statsStack.trailingAnchor.constraint(equalTo: projectCard.trailingAnchor),
+            statsStack.topAnchor.constraint(equalTo: projectCard.bottomAnchor, constant: 11),
+            statsStack.heightAnchor.constraint(equalToConstant: 52),
+
+            recentTitle.leadingAnchor.constraint(equalTo: projectCard.leadingAnchor),
+            recentTitle.topAnchor.constraint(equalTo: statsStack.bottomAnchor, constant: 15),
+
+            summaryLabel.leadingAnchor.constraint(equalTo: projectCard.leadingAnchor),
+            summaryLabel.trailingAnchor.constraint(equalTo: projectCard.trailingAnchor),
+            summaryLabel.topAnchor.constraint(equalTo: recentTitle.bottomAnchor, constant: 4),
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            separator.topAnchor.constraint(equalTo: summaryLabel.bottomAnchor, constant: 9),
+            separator.heightAnchor.constraint(equalToConstant: 1),
+
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: separator.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: commandField.topAnchor, constant: -10),
+
+            commandField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            commandField.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor, constant: -8),
+            commandField.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            commandField.heightAnchor.constraint(equalToConstant: 28),
+            actionButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            actionButton.centerYAnchor.constraint(equalTo: commandField.centerYAnchor),
+            actionButton.widthAnchor.constraint(equalToConstant: 62),
+            actionButton.heightAnchor.constraint(equalToConstant: 28),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("不支持从归档创建")
+    }
+
+    override func layout() {
+        super.layout()
+        guard let scroll = outputView.enclosingScrollView else { return }
+        let availableWidth = max(0, scroll.contentSize.width)
+        if abs(outputView.frame.width - availableWidth) > 0.5 {
+            outputView.setFrameSize(NSSize(
+                width: availableWidth,
+                height: max(outputView.frame.height, scroll.contentSize.height)
+            ))
+        }
+    }
+
+    func select(segment: Int) {
+        segmented.selectedSegment = max(0, min(3, segment))
+        updateMode()
+        refresh()
+    }
+
+    func refresh() {
+        guard !projectPath.isEmpty else {
+            outputView.string = "尚未选择项目。"
+            return
+        }
+        switch segmented.selectedSegment {
+        case 0:
+            loadChanges()
+        case 1:
+            loadFiles()
+        case 2:
+            loadEcosystem()
+        default:
+            showTools()
+        }
+    }
+
+    private func updateMode() {
+        let terminal = segmented.selectedSegment == 3
+        let extensions = segmented.selectedSegment == 2
+        commandField.isHidden = !(terminal || extensions)
+        commandField.placeholderString = terminal
+            ? "输入命令后按回车运行"
+            : "插件地址，或：mcp add 名称 URL"
+        actionButton.title = terminal ? "运行" : (extensions ? "安装" : "刷新")
+        summaryLabel.stringValue = [
+            "查看当前 Git 工作区的文件改动",
+            "浏览当前项目文件",
+            "查看 MCP、插件与技能状态",
+            "运行命令、测试与构建",
+        ][segmented.selectedSegment]
+    }
+
+    private func loadChanges() {
+        summaryLabel.stringValue = "正在读取 Git 更改…"
+        runInBackground { [projectPath] in
+            guard FileManager.default.fileExists(atPath: projectPath) else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.summaryLabel.stringValue = "项目缺失"
+                    self?.outputView.string = "当前项目目录不存在，请在聊天区重新选择项目。"
+                    self?.scrollToTop()
+                }
+                return
+            }
+            let status = Self.run(
+                executable: "/usr/bin/git",
+                arguments: ["-C", projectPath, "status", "--short"]
+            )
+            let lines = status.output
+                .split(separator: "\n")
+                .map(String.init)
+            let total = lines.count
+            let visibleLines = Array(lines.prefix(50))
+            let visibleRaw = visibleLines.joined(separator: "\n")
+            let body: String
+            if status.code != 0 {
+                body = "当前目录不是 Git 仓库，或无法读取状态。\n\n\(Self.capped(status.output))"
+            } else if total == 0 {
+                body = "最近变更\n\n工作区没有未提交的更改。"
+            } else {
+                let entries = visibleLines.map { self.formattedChange($0, projectPath: projectPath) }
+                let suffix = total > visibleLines.count
+                    ? "\n\n还有 (total - visibleLines.count) 个文件未显示。"
+                    : ""
+                body = "最近变更\n\n" + entries.joined(separator: "\n\n") + suffix
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.summaryLabel.stringValue = status.code != 0
+                    ? "Git 工作区"
+                    : "最近变更 · \(total) 个文件"
+                if status.code == 0 && total > 0 {
+                    self?.outputView.textStorage?.setAttributedString(
+                        self?.renderChanges(visibleRaw, projectPath: projectPath, total: total) ?? NSAttributedString(string: body)
+                    )
+                } else {
+                    self?.outputView.string = Self.capped(body)
+                }
+                self?.scrollToTop()
+            }
+        }
+    }
+
+    private func formattedChange(_ raw: String, projectPath: String) -> String {
+        let code = raw.count >= 2 ? String(raw.prefix(2)) : raw
+        let rawPath = raw.count > 3 ? String(raw.dropFirst(3)).trimmingCharacters(in: .whitespaces) : raw
+        let path = rawPath.components(separatedBy: " -> ").last ?? rawPath
+        let url = URL(fileURLWithPath: path)
+        let name = url.lastPathComponent.isEmpty ? path : url.lastPathComponent
+        let relative = path.hasPrefix(projectPath + "/")
+            ? String(path.dropFirst(projectPath.count + 1))
+            : path
+        let state: String
+        let dot: String
+        if code.contains("?") || code.contains("A") {
+            state = "已添加"
+            dot = "●"
+        } else if code.contains("D") {
+            state = "已删除"
+            dot = "●"
+        } else {
+            state = "已修改"
+            dot = "●"
+        }
+        return "\(dot)  \(name)  ·  \(state)\n    \(relative)"
+    }
+
+    private func renderChanges(_ raw: String, projectPath: String, total: Int) -> NSAttributedString {
+        let visibleCount = raw.split(separator: "\n").count
+        let result = NSMutableAttributedString(
+            string: "最近变更\(total > visibleCount ? "（显示前 50 个）" : "")\n\n",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                .foregroundColor: NSColor(calibratedWhite: 0.92, alpha: 0.92),
+            ]
+        )
+        for item in raw.split(separator: "\n") {
+            let source = String(item)
+            let line = formattedChange(source, projectPath: projectPath)
+            let attributed = NSMutableAttributedString(
+                string: line + "\n\n",
+                attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
+                    .foregroundColor: Palette.secondaryText,
+                ]
+            )
+            let statusColor: NSColor
+            let code = source.count >= 2 ? String(source.prefix(2)) : source
+            if code.contains("?") || code.contains("A") { statusColor = Palette.success }
+            else if code.contains("D") { statusColor = Palette.error }
+            else { statusColor = Palette.accent }
+            let firstLineLength = (line as NSString).range(of: "\n").location
+            attributed.addAttribute(.foregroundColor, value: statusColor, range: NSRange(location: 0, length: firstLineLength))
+            result.append(attributed)
+        }
+        if total > visibleCount {
+            result.append(NSAttributedString(
+                string: "\n还有 \(total - visibleCount) 个文件未显示。",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 11),
+                    .foregroundColor: Palette.secondaryText,
+                ]
+            ))
+        }
+        return result
+    }
+
+    /// Prefer Git's indexed file list over a recursive filesystem walk. A
+    /// Rust workspace can contain a very large `target/` tree on the external
+    /// drive; scanning it for a small Workspace preview competes with task
+    /// startup and makes the Send action appear stuck.
+    private func projectFiles(_ projectPath: String) -> [String] {
+        let tracked = Self.run(
+            executable: "/usr/bin/git",
+            arguments: ["-C", projectPath, "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+        )
+        if tracked.code == 0 {
+            return tracked.output
+                .split(separator: "\0", omittingEmptySubsequences: true)
+                .map { projectPath + "/" + String($0) }
+        }
+        let fallback = Self.run(
+            executable: "/usr/bin/find",
+            arguments: [
+                projectPath,
+                "-maxdepth", "5",
+                "-type", "d",
+                "(",
+                "-path", "*/.git",
+                "-o", "-path", "*/target",
+                "-o", "-path", "*/dist",
+                "-o", "-path", "*/node_modules",
+                "-o", "-path", "*/.cache",
+                ")",
+                "-prune",
+                "-o", "-type", "f", "-print",
+            ]
+        )
+        return fallback.output.split(separator: "\n").map(String.init)
+    }
+
+    private func loadFiles() {
+        summaryLabel.stringValue = "正在读取项目文件…"
+        runInBackground { [projectPath] in
+            let files = self.projectFiles(projectPath)
+                .prefix(24)
+                .map { path in
+                    let url = URL(fileURLWithPath: path)
+                    let relative = url.path.replacingOccurrences(of: projectPath + "/", with: "")
+                    let icon = url.pathExtension == "swift" || url.pathExtension == "rs" ? "◈" : "□"
+                    return icon + "  " + relative
+                }
+            let body = files.isEmpty
+                ? "当前项目还没有可显示的文件。"
+                : "项目文件\n\n" + files.joined(separator: "\n")
+            DispatchQueue.main.async { [weak self] in
+                self?.summaryLabel.stringValue = files.isEmpty ? "没有项目文件" : "显示前 24 个文件"
+                self?.outputView.string = Self.capped(body)
+                self?.scrollToTop()
+            }
+        }
+    }
+
+    private func updateProjectStats() {
+        guard !projectPath.isEmpty, statValueLabels.count >= 4 else { return }
+        runInBackground { [projectPath] in
+            let paths = self.projectFiles(projectPath)
+            var code = 0
+            var tests = 0
+            var docs = 0
+            let changeResult = Self.run(executable: "/usr/bin/git", arguments: ["-C", projectPath, "status", "--short"])
+            let changes = changeResult.output.split(separator: "\n").count
+            for path in paths.prefix(500) {
+                let url = URL(fileURLWithPath: path)
+                let ext = url.pathExtension.lowercased()
+                if ["rs", "swift", "ts", "tsx", "js", "jsx", "py", "go", "java", "c", "cpp", "h"].contains(ext) {
+                    code += 1
+                    if path.localizedCaseInsensitiveContains("test") || path.localizedCaseInsensitiveContains("spec") {
+                        tests += 1
+                    }
+                } else if ["md", "mdx", "txt", "rst"].contains(ext) {
+                    docs += 1
+                }
+            }
+            let values = ["\(code)", "\(tests)", "\(docs)", "\(changes)"]
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                for (index, value) in values.enumerated() where index < self.statValueLabels.count {
+                    self.statValueLabels[index].stringValue = value
+                }
+            }
+        }
+    }
+
+    private func showTools() {
+        summaryLabel.stringValue = "Agent 工具箱"
+        outputView.string = """
+        代码分析        扫描架构、依赖与潜在问题
+        性能分析        采集构建与运行时性能
+        测试运行        执行项目测试并汇总结果
+        构建项目        在当前工作区运行构建命令
+        Git 工具        查看、暂存与审查文件更改
+        部署工具        连接发布流程与环境配置
+
+        在底部输入命令，可直接在当前项目目录执行。
+        """
+        scrollToTop()
+    }
+
+    private func loadEcosystem() {
+        summaryLabel.stringValue = "正在读取扩展生态…"
+        runInBackground { [projectPath] in
+            guard let executable = BackendLocator.bundledBinaryURL ?? BackendLocator.wrapperURL else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.outputView.string = "未找到 Nexus 编码代理。"
+                }
+                return
+            }
+            let environment = BackendLocator.processEnvironment()
+            let mcp = Self.run(
+                executable: executable.path,
+                arguments: ["mcp", "list"],
+                environment: environment
+            )
+            let plugins = Self.run(
+                executable: executable.path,
+                arguments: ["plugin", "list"],
+                environment: environment
+            )
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let skillFolders = [
+                home.appendingPathComponent(".nexus/skills").path,
+                URL(fileURLWithPath: projectPath).appendingPathComponent(".nexus/skills").path,
+                URL(fileURLWithPath: projectPath).appendingPathComponent(".codex/skills").path,
+            ]
+            let skills = skillFolders.flatMap { folder -> [String] in
+                let names = (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
+                return names.map { "\(folder)/\($0)" }
+            }
+            let skillText = skills.isEmpty
+                ? "尚未发现技能目录。"
+                : skills.map { "• \($0)" }.joined(separator: "\n")
+            let body = """
+            MCP 服务器
+            \(mcp.output.isEmpty ? "尚未配置 MCP 服务器。" : mcp.output)
+
+            插件
+            \(plugins.output.isEmpty ? "尚未安装插件。" : plugins.output)
+
+            技能
+            \(skillText)
+
+            配置文件
+            \(NexusConfiguration.shared.configURL.path)
+            """
+            DispatchQueue.main.async { [weak self] in
+                self?.summaryLabel.stringValue = "MCP、插件与技能"
+                self?.outputView.string = Self.capped(body)
+                self?.scrollToTop()
+            }
+        }
+    }
+
+    @objc private func segmentChanged() {
+        updateMode()
+        refresh()
+    }
+
+    @objc private func primaryAction() {
+        if segmented.selectedSegment == 3 {
+            runTerminalCommand()
+        } else if segmented.selectedSegment == 2 {
+            manageExtension()
+        } else {
+            refresh()
+        }
+    }
+
+    private func manageExtension() {
+        let source = commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty else {
+            refresh()
+            return
+        }
+        guard let executable = BackendLocator.bundledBinaryURL ?? BackendLocator.wrapperURL else {
+            outputView.string = "未找到 Nexus 编码代理。"
+            return
+        }
+        commandField.stringValue = ""
+        actionButton.isEnabled = false
+        let isMCPCommand = source.hasPrefix("mcp ")
+        let arguments: [String]
+        let actionName: String
+        if isMCPCommand {
+            arguments = source.split(whereSeparator: \.isWhitespace).map(String.init)
+            actionName = "配置 MCP"
+        } else {
+            arguments = ["plugin", "install", "--trust", source]
+            actionName = "安装插件"
+        }
+        outputView.string = "正在\(actionName)：\(source)\n\n"
+        runInBackground {
+            let result = Self.run(
+                executable: executable.path,
+                arguments: arguments,
+                environment: BackendLocator.processEnvironment()
+            )
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.actionButton.isEnabled = true
+                if result.code == 0 {
+                    self.outputView.string = "\(actionName)完成。\n\n\(result.output)"
+                    self.loadEcosystem()
+                } else {
+                    self.outputView.string = "\(actionName)失败。\n\n\(result.output)"
+                }
+            }
+        }
+    }
+
+    @objc private func runTerminalCommand() {
+        guard runningProcess == nil else { return }
+        let command = commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else { return }
+        commandField.stringValue = ""
+        outputView.string += "$ \(command)\n"
+        let task = Process()
+        let pipe = Pipe()
+        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        task.arguments = ["-lc", command]
+        task.currentDirectoryURL = URL(fileURLWithPath: projectPath, isDirectory: true)
+        task.environment = ProcessInfo.processInfo.environment
+        task.standardOutput = pipe
+        task.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                self?.outputView.string += text
+                self?.scrollToBottom()
+            }
+        }
+        task.terminationHandler = { [weak self] process in
+            pipe.fileHandleForReading.readabilityHandler = nil
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let text = String(data: data, encoding: .utf8) ?? ""
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.runningProcess = nil
+                self.actionButton.isEnabled = true
+                self.outputView.string += text
+                self.outputView.string += "\n[命令结束，退出代码 \(process.terminationStatus)]\n\n"
+                self.scrollToBottom()
+            }
+        }
+        do {
+            try task.run()
+            runningProcess = task
+            actionButton.isEnabled = false
+        } catch {
+            outputView.string += "无法运行命令：\(error.localizedDescription)\n"
+        }
+    }
+
+    @objc private func closePanel() {
+        onClose?()
+    }
+
+    private func runInBackground(_ body: @escaping () -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async(execute: body)
+    }
+
+    private func scrollToTop() {
+        outputView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+    }
+
+    private func scrollToBottom() {
+        outputView.scrollRangeToVisible(
+            NSRange(location: outputView.string.utf16.count, length: 0)
+        )
+    }
+
+    private static func run(
+        executable: String,
+        arguments: [String],
+        environment: [String: String]? = nil
+    ) -> (code: Int32, output: String) {
+        let task = Process()
+        let pipe = Pipe()
+        task.executableURL = URL(fileURLWithPath: executable)
+        task.arguments = arguments
+        if let environment {
+            task.environment = environment
+        }
+        task.standardOutput = pipe
+        task.standardError = pipe
+        do {
+            try task.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
+            return (task.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        } catch {
+            return (1, error.localizedDescription)
+        }
+    }
+
+    private static func capped(_ text: String) -> String {
+        let limit = 600_000
+        if text.utf8.count <= limit {
+            return text
+        }
+        return String(text.prefix(limit)) + "\n\n…内容过长，已截断显示。"
+    }
+}
+
+// MARK: - 设置窗口
+
+final class SettingsWindowController: NSWindowController {
+    private let keyField = NSSecureTextField()
+    private let modelField = NSTextField()
+    private let endpointField = NSTextField()
+    private let keyStatus = label("", size: 11)
+    private let resultLabel = label("", size: 12)
+    private let saveButton = NSButton(title: "保存设置", target: nil, action: nil)
+    private let resetLayoutButton = NSButton(title: "重置界面布局", target: nil, action: nil)
+    var onSaved: (() -> Void)?
+    var onResetLayout: (() -> Void)?
+
+    convenience init() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 590, height: 470),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Nexus 设置"
+        window.isReleasedWhenClosed = false
+        window.center()
+        self.init(window: window)
+        buildUI()
+        reload()
+    }
+
+    private func buildUI() {
+        guard let content = window?.contentView else { return }
+        content.wantsLayer = true
+        content.layer?.backgroundColor = Palette.canvas.cgColor
+
+        let title = label("设置", size: 24, weight: .semibold)
+        let subtitle = label("管理模型和本地凭据", size: 13, color: Palette.secondaryText)
+        let card = LayerView(fillColor: Palette.elevated, cornerRadius: 12, strokeColor: Palette.border)
+        let providerValue = label("DeepSeek", size: 13, weight: .medium)
+
+        [title, subtitle, card, providerValue, keyField, modelField, endpointField, keyStatus, resultLabel, saveButton, resetLayoutButton]
+            .forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+
+        let providerLabel = label("模型提供商", size: 12, weight: .medium, color: Palette.secondaryText)
+        let apiLabel = label("DeepSeek API 密钥", size: 12, weight: .medium, color: Palette.secondaryText)
+        let modelLabel = label("模型", size: 12, weight: .medium, color: Palette.secondaryText)
+        let endpointLabel = label("接口地址", size: 12, weight: .medium, color: Palette.secondaryText)
+        let privacy = label(
+            "密钥仅保存在本机 macOS 钥匙串中，不会写入配置文件或日志。",
+            size: 11,
+            color: Palette.secondaryText
+        )
+        [providerLabel, apiLabel, modelLabel, endpointLabel, privacy]
+            .forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+
+        keyField.placeholderString = "输入新密钥以保存或替换"
+        modelField.placeholderString = "例如 gpt-4.1"
+        endpointField.placeholderString = "https://api.deepseek.com"
+        saveButton.bezelStyle = .rounded
+        saveButton.keyEquivalent = "\r"
+        saveButton.target = self
+        saveButton.action = #selector(save)
+        resetLayoutButton.bezelStyle = .rounded
+        resetLayoutButton.target = self
+        resetLayoutButton.action = #selector(resetLayout)
+        resultLabel.maximumNumberOfLines = 2
+
+        content.addSubview(title)
+        content.addSubview(subtitle)
+        content.addSubview(card)
+        card.addSubview(providerLabel)
+        card.addSubview(providerValue)
+        card.addSubview(apiLabel)
+        card.addSubview(keyField)
+        card.addSubview(keyStatus)
+        card.addSubview(modelLabel)
+        card.addSubview(modelField)
+        card.addSubview(endpointLabel)
+        card.addSubview(endpointField)
+        card.addSubview(privacy)
+        content.addSubview(resultLabel)
+        content.addSubview(saveButton)
+        content.addSubview(resetLayoutButton)
+
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 30),
+            title.topAnchor.constraint(equalTo: content.topAnchor, constant: 28),
+            subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
+
+            card.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 30),
+            card.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -30),
+            card.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 22),
+            card.heightAnchor.constraint(equalToConstant: 300),
+
+            providerLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
+            providerLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: 20),
+            providerValue.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 160),
+            providerValue.centerYAnchor.constraint(equalTo: providerLabel.centerYAnchor),
+
+            apiLabel.leadingAnchor.constraint(equalTo: providerLabel.leadingAnchor),
+            apiLabel.topAnchor.constraint(equalTo: providerLabel.bottomAnchor, constant: 29),
+            keyField.leadingAnchor.constraint(equalTo: providerValue.leadingAnchor),
+            keyField.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+            keyField.centerYAnchor.constraint(equalTo: apiLabel.centerYAnchor),
+            keyField.heightAnchor.constraint(equalToConstant: 27),
+            keyStatus.leadingAnchor.constraint(equalTo: keyField.leadingAnchor),
+            keyStatus.topAnchor.constraint(equalTo: keyField.bottomAnchor, constant: 5),
+
+            modelLabel.leadingAnchor.constraint(equalTo: providerLabel.leadingAnchor),
+            modelLabel.topAnchor.constraint(equalTo: apiLabel.bottomAnchor, constant: 58),
+            modelField.leadingAnchor.constraint(equalTo: providerValue.leadingAnchor),
+            modelField.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+            modelField.centerYAnchor.constraint(equalTo: modelLabel.centerYAnchor),
+            modelField.heightAnchor.constraint(equalToConstant: 27),
+
+            endpointLabel.leadingAnchor.constraint(equalTo: providerLabel.leadingAnchor),
+            endpointLabel.topAnchor.constraint(equalTo: modelLabel.bottomAnchor, constant: 35),
+            endpointField.leadingAnchor.constraint(equalTo: providerValue.leadingAnchor),
+            endpointField.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+            endpointField.centerYAnchor.constraint(equalTo: endpointLabel.centerYAnchor),
+            endpointField.heightAnchor.constraint(equalToConstant: 27),
+
+            privacy.leadingAnchor.constraint(equalTo: providerLabel.leadingAnchor),
+            privacy.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+            privacy.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -17),
+
+            resultLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            resultLabel.centerYAnchor.constraint(equalTo: saveButton.centerYAnchor),
+            resultLabel.trailingAnchor.constraint(lessThanOrEqualTo: resetLayoutButton.leadingAnchor, constant: -12),
+            saveButton.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            saveButton.topAnchor.constraint(equalTo: card.bottomAnchor, constant: 22),
+            saveButton.widthAnchor.constraint(equalToConstant: 100),
+            resetLayoutButton.trailingAnchor.constraint(equalTo: saveButton.leadingAnchor, constant: -10),
+            resetLayoutButton.centerYAnchor.constraint(equalTo: saveButton.centerYAnchor),
+            resetLayoutButton.widthAnchor.constraint(equalToConstant: 126),
+        ])
+    }
+
+    private func reload() {
+        let configuration = NexusConfiguration.shared
+        modelField.stringValue = configuration.value(
+            named: "model",
+            inSection: "model.openai-coding"
+        ) ?? "gpt-4.1"
+        endpointField.stringValue = configuration.value(
+            named: "base_url",
+            inSection: "model.openai-coding"
+        ) ?? "https://api.deepseek.com"
+        updateKeyStatus()
+    }
+
+    private func updateKeyStatus() {
+        let saved = NexusConfiguration.shared.hasAPIKey
+        keyStatus.stringValue = saved ? "已安全保存；留空不会修改" : "尚未保存密钥"
+        keyStatus.textColor = saved ? Palette.success : Palette.warning
+    }
+
+    @objc private func save() {
+        resultLabel.stringValue = ""
+        do {
+            try NexusConfiguration.shared.updateOpenAI(
+                model: modelField.stringValue,
+                baseURL: endpointField.stringValue
+            )
+        } catch {
+            showResult(error.localizedDescription, success: false)
+            return
+        }
+
+        let newKey = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newKey.isEmpty else {
+            showResult("设置已保存。", success: true)
+            onSaved?()
+            return
+        }
+        if newKey.contains("\"") || newKey.contains("\\") || newKey.contains("\n") {
+            showResult("接口密钥格式不正确。", success: false)
+            return
+        }
+        saveButton.isEnabled = false
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                try SecureCredentialStore.save(newKey)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    // 清除早期版本可能留下的 TOML 明文；失败时让用户知道，
+                    // 但不把敏感内容拼进错误信息。
+                    do {
+                        try NexusConfiguration.shared.removePlaintextAPIKey()
+                    } catch {
+                        self.saveButton.isEnabled = true
+                        self.showResult("凭据已保存，但旧配置清理失败，请重试。", success: false)
+                        return
+                    }
+                    self.saveButton.isEnabled = true
+                    self.keyField.stringValue = ""
+                    self.updateKeyStatus()
+                    self.showResult("设置和安全凭据已保存。", success: true)
+                    self.onSaved?()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.saveButton.isEnabled = true
+                    self.showResult("无法保存安全凭据：\(error.localizedDescription)", success: false)
+                }
+            }
+        }
+    }
+
+    @objc private func resetLayout() {
+        onResetLayout?()
+        showResult("界面布局已恢复默认。", success: true)
+    }
+
+    private func showResult(_ text: String, success: Bool) {
+        resultLabel.stringValue = text
+        resultLabel.textColor = success ? Palette.success : NSColor.systemRed
+    }
+}
+
+// MARK: - 可调三栏布局
+
+/// 三栏工作区的原生 AppKit 分栏容器。
+///
+/// 这里使用 NSSplitView 自带的拖拽机制，而不是把尺寸锁死在约束上：
+/// 这样鼠标移动很快、离开面板或窗口尺寸变化时，系统仍能持续交付拖拽事件。
+/// 两侧尺寸写入 UserDefaults，效果等价于 Web Renderer 中的 localStorage。
+final class ResizableSplitView: NSSplitView, NSSplitViewDelegate {
+    static let sidebarStorageKey = "ai-dev-one.sidebar-width"
+    static let workspaceStorageKey = "ai-dev-one.workspace-width"
+
+    let sidebarDefaultWidth: CGFloat = 260
+    let sidebarMinimumWidth: CGFloat = 220
+    let sidebarMaximumWidth: CGFloat = 420
+    let workspaceDefaultWidth: CGFloat = 340
+    let workspaceMinimumWidth: CGFloat = 280
+    let workspaceMaximumWidth: CGFloat = 620
+    let chatMinimumWidth: CGFloat = 520
+
+    private(set) var sidebarWidth: CGFloat
+    private(set) var workspaceWidth: CGFloat
+    private var applyingStoredWidths = false
+    private var didRestoreInitialWidths = false
+    private var hoveredDivider: Int?
+    private var draggingDivider: Int?
+    private var dividerTrackingAreas: [NSTrackingArea] = []
+
+    override init(frame frameRect: NSRect) {
+        let defaults = UserDefaults.standard
+        let savedSidebar = defaults.object(forKey: Self.sidebarStorageKey) as? NSNumber
+        let savedWorkspace = defaults.object(forKey: Self.workspaceStorageKey) as? NSNumber
+        sidebarWidth = savedSidebar.map { CGFloat(truncating: $0) } ?? sidebarDefaultWidth
+        workspaceWidth = savedWorkspace.map { CGFloat(truncating: $0) } ?? workspaceDefaultWidth
+        super.init(frame: frameRect)
+        // 启动时先把历史值规范化，异常值回到默认值，避免旧版本数据撑破三栏。
+        let normalizedSidebar = normalizedStoredWidth(
+            sidebarWidth,
+            defaultValue: sidebarDefaultWidth,
+            minimum: sidebarMinimumWidth,
+            maximum: sidebarMaximumWidth
+        )
+        let normalizedWorkspace = normalizedStoredWidth(
+            workspaceWidth,
+            defaultValue: workspaceDefaultWidth,
+            minimum: workspaceMinimumWidth,
+            maximum: workspaceMaximumWidth
+        )
+        if normalizedSidebar != sidebarWidth {
+            defaults.removeObject(forKey: Self.sidebarStorageKey)
+        }
+        if normalizedWorkspace != workspaceWidth {
+            defaults.removeObject(forKey: Self.workspaceStorageKey)
+        }
+        sidebarWidth = normalizedSidebar
+        workspaceWidth = normalizedWorkspace
+        defaults.set(Double(sidebarWidth), forKey: Self.sidebarStorageKey)
+        defaults.set(Double(workspaceWidth), forKey: Self.workspaceStorageKey)
+        isVertical = true
+        dividerStyle = .thin
+        arrangesAllSubviews = false
+        delegate = self
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        autoresizesSubviews = true
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("不支持从归档创建")
+    }
+
+    override func layout() {
+        super.layout()
+        applyStoredWidthsIfPossible()
+        updateTrackingAreasForDividers()
+    }
+
+    override func adjustSubviews() {
+        // NSSplitView 默认会按 fittingSize 比例重排非 arranged subviews，
+        // 这会把用户的 260/340 初始值压回内容的最小宽度。这里接管重排，
+        // 让保存的 pane 宽度成为唯一来源，同时仍由 delegate 负责拖拽约束。
+        if bounds.width > 0, subviews.count >= 3, !applyingStoredWidths, draggingDivider == nil {
+            applyStoredWidthsIfPossible()
+        } else {
+            super.adjustSubviews()
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        updateTrackingAreasForDividers()
+    }
+
+    override func drawDivider(in rect: NSRect) {
+        let index = dividerIndex(at: rect.midX)
+        let alpha: CGFloat
+        if draggingDivider == index {
+            alpha = 0.70
+        } else if hoveredDivider == index {
+            alpha = 0.40
+        } else {
+            alpha = 0.10
+        }
+
+        let lineRect = isVertical
+            ? NSRect(x: rect.midX - 0.5, y: rect.minY, width: 1, height: rect.height)
+            : NSRect(x: rect.minX, y: rect.midY - 0.5, width: rect.width, height: 1)
+        if alpha > 0.2 {
+            let shadow = NSShadow()
+            shadow.shadowColor = Palette.accent.withAlphaComponent(alpha * 0.45)
+            shadow.shadowBlurRadius = draggingDivider == index ? 12 : 7
+            shadow.shadowOffset = .zero
+            shadow.set()
+        }
+        Palette.accent.withAlphaComponent(alpha).setFill()
+        NSBezierPath(rect: lineRect).fill()
+        NSShadow().set()
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        for index in 0..<max(0, subviews.count - 1) {
+            let rect = dividerFrame(at: index).insetBy(dx: -2, dy: 0)
+            addCursorRect(rect, cursor: .resizeLeftRight)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let index = dividerIndex(at: point.x)
+        if event.clickCount >= 2, let index {
+            resetDivider(index)
+            return
+        }
+        draggingDivider = index
+        needsDisplay = true
+        super.mouseDown(with: event)
+        draggingDivider = nil
+        needsDisplay = true
+        persistCurrentWidths()
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        effectiveRect proposedEffectiveRect: NSRect,
+        forDrawnRect drawnRect: NSRect,
+        ofDividerAt dividerIndex: Int
+    ) -> NSRect {
+        // 视觉线保持 1px，但命中区域为 5px，方便精确拖拽。
+        proposedEffectiveRect.insetBy(dx: -2, dy: 0)
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        additionalEffectiveRectOfDividerAt dividerIndex: Int
+    ) -> NSRect {
+        let rect = dividerFrame(at: dividerIndex)
+        return rect.insetBy(dx: -2, dy: 0)
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainSplitPosition proposedPosition: CGFloat,
+        ofSubviewAt dividerIndex: Int
+    ) -> CGFloat {
+        let totalWidth = bounds.width
+        let divider = dividerThickness
+        let twoDividers = divider * 2
+
+        if dividerIndex == 0 {
+            // 先保证 Chat 和 Workspace 的最小宽度，再允许 Sidebar 在其范围内变化。
+            let maximum = min(
+                sidebarMaximumWidth,
+                totalWidth - workspaceMinimumWidth - chatMinimumWidth - twoDividers
+            )
+            return clamp(proposedPosition, sidebarMinimumWidth, max(sidebarMinimumWidth, maximum))
+        }
+
+        let leftWidth = subviews.indices.contains(0) ? subviews[0].frame.width : sidebarWidth
+        let minimumPosition = max(
+            leftWidth + divider + chatMinimumWidth,
+            totalWidth - workspaceMaximumWidth
+        )
+        let maximumPosition = totalWidth - workspaceMinimumWidth
+        return clamp(proposedPosition, minimumPosition, max(minimumPosition, maximumPosition))
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard !applyingStoredWidths, subviews.count >= 3 else { return }
+        persistCurrentWidths()
+        needsDisplay = true
+    }
+
+    func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) {
+        // 窗口变化时重排三栏，但不改变用户保存的两侧宽度；仅在空间不足时按约束压缩。
+        applyStoredWidthsIfPossible()
+    }
+
+    func resetDivider(_ dividerIndex: Int) {
+        if dividerIndex == 0 {
+            sidebarWidth = sidebarDefaultWidth
+        } else if dividerIndex == 1 {
+            workspaceWidth = workspaceDefaultWidth
+        } else {
+            return
+        }
+        applyStoredWidthsIfPossible()
+        persistCurrentWidths()
+        needsDisplay = true
+    }
+
+    func resetLayout() {
+        UserDefaults.standard.removeObject(forKey: Self.sidebarStorageKey)
+        UserDefaults.standard.removeObject(forKey: Self.workspaceStorageKey)
+        sidebarWidth = sidebarDefaultWidth
+        workspaceWidth = workspaceDefaultWidth
+        applyStoredWidthsIfPossible()
+        persistCurrentWidths()
+        needsDisplay = true
+    }
+
+    func restoreStoredWidths() {
+        didRestoreInitialWidths = true
+        applyStoredWidthsIfPossible()
+        needsDisplay = true
+    }
+
+    private func applyStoredWidthsIfPossible() {
+        guard bounds.width > 0, subviews.count >= 3, !applyingStoredWidths, draggingDivider == nil else { return }
+        applyingStoredWidths = true
+
+        let totalWidth = bounds.width
+        let divider = dividerThickness
+        let twoDividers = divider * 2
+        let maxSidebar = min(
+            sidebarMaximumWidth,
+            totalWidth - workspaceMinimumWidth - chatMinimumWidth - twoDividers
+        )
+        let safeSidebar = clamp(
+            sidebarWidth,
+            sidebarMinimumWidth,
+            max(sidebarMinimumWidth, maxSidebar)
+        )
+        sidebarWidth = safeSidebar
+        let minimumWorkspace = workspaceMinimumWidth
+        let maximumWorkspace = min(
+            workspaceMaximumWidth,
+            max(minimumWorkspace, totalWidth - safeSidebar - chatMinimumWidth - twoDividers)
+        )
+        workspaceWidth = clamp(workspaceWidth, minimumWorkspace, maximumWorkspace)
+        setPaneFrames(sidebarWidth: safeSidebar, workspaceWidth: workspaceWidth)
+
+        applyingStoredWidths = false
+        persistCurrentWidths()
+    }
+
+    private func setPaneFrames(sidebarWidth: CGFloat, workspaceWidth: CGFloat) {
+        guard subviews.count >= 3 else { return }
+        let divider = dividerThickness
+        let totalWidth = bounds.width
+        let height = bounds.height
+        let chatWidth = max(0, totalWidth - sidebarWidth - workspaceWidth - divider * 2)
+        subviews[0].frame = NSRect(x: 0, y: 0, width: sidebarWidth, height: height)
+        subviews[1].frame = NSRect(
+            x: sidebarWidth + divider,
+            y: 0,
+            width: chatWidth,
+            height: height
+        )
+        subviews[2].frame = NSRect(
+            x: sidebarWidth + divider + chatWidth + divider,
+            y: 0,
+            width: workspaceWidth,
+            height: height
+        )
+    }
+
+    private func persistCurrentWidths() {
+        // AppKit 在窗口初次安装 contentView 时会先用 fittingSize 重排一次。
+        // 在真正恢复保存值之前禁止这次中间帧覆盖 UserDefaults。
+        guard didRestoreInitialWidths, bounds.width > 0, subviews.count >= 3,
+              subviews[0].frame.width > 0, subviews[2].frame.width > 0 else { return }
+        let sidebar = clamp(subviews[0].frame.width, sidebarMinimumWidth, sidebarMaximumWidth)
+        let workspace = clamp(subviews[2].frame.width, workspaceMinimumWidth, workspaceMaximumWidth)
+        sidebarWidth = sidebar
+        workspaceWidth = workspace
+        UserDefaults.standard.set(Double(sidebar), forKey: Self.sidebarStorageKey)
+        UserDefaults.standard.set(Double(workspace), forKey: Self.workspaceStorageKey)
+    }
+
+    private func updateTrackingAreasForDividers() {
+        dividerTrackingAreas.forEach(removeTrackingArea)
+        dividerTrackingAreas.removeAll(keepingCapacity: true)
+        for index in 0..<max(0, subviews.count - 1) {
+            let rect = dividerFrame(at: index).insetBy(dx: -3, dy: 0)
+            guard !rect.isEmpty else { continue }
+            let area = NSTrackingArea(
+                rect: rect,
+                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                owner: self,
+                userInfo: ["divider": index]
+            )
+            addTrackingArea(area)
+            dividerTrackingAreas.append(area)
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hoveredDivider = (event.trackingArea?.userInfo?["divider"] as? Int)
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hoveredDivider = nil
+        needsDisplay = true
+    }
+
+    private func dividerIndex(at x: CGFloat) -> Int? {
+        for index in 0..<max(0, subviews.count - 1) {
+            let rect = dividerFrame(at: index).insetBy(dx: -4, dy: 0)
+            if rect.minX...rect.maxX ~= x { return index }
+        }
+        return nil
+    }
+
+    private func clamp(_ value: CGFloat, _ minimum: CGFloat, _ maximum: CGFloat) -> CGFloat {
+        min(max(value, minimum), max(minimum, maximum))
+    }
+
+    private func normalizedStoredWidth(
+        _ value: CGFloat,
+        defaultValue: CGFloat,
+        minimum: CGFloat,
+        maximum: CGFloat
+    ) -> CGFloat {
+        guard value.isFinite, value >= minimum, value <= maximum else {
+            return defaultValue
+        }
+        return value
+    }
+
+    private func dividerFrame(at index: Int) -> NSRect {
+        guard index >= 0, index + 1 < subviews.count else { return .zero }
+        if isVertical {
+            let left = subviews[index].frame.maxX
+            let right = subviews[index + 1].frame.minX
+            let center = abs(right - left) < 2 ? (left + right) / 2 : left
+            return NSRect(
+                x: center - dividerThickness / 2,
+                y: bounds.minY,
+                width: max(dividerThickness, right - left),
+                height: bounds.height
+            )
+        }
+        let top = subviews[index].frame.maxY
+        let bottom = subviews[index + 1].frame.minY
+        let center = abs(top - bottom) < 2 ? (top + bottom) / 2 : top
+        return NSRect(
+            x: bounds.minX,
+            y: center - dividerThickness / 2,
+            width: bounds.width,
+            height: max(dividerThickness, top - bottom)
+        )
+    }
+}
+
+// MARK: - 主窗口
+
+final class MainViewController: NSViewController {
+    var onRequestWindowSize: ((NSSize) -> Void)?
+
+    private let store = SessionStore.shared
+    private let topBar = TopBarView()
+    private let bottomBar = BottomStatusBarView()
+    private let sidebar = SidebarView()
+    private let chat = ChatContentView()
+    private let workspacePanel = WorkspacePanelView()
+    private let split = ResizableSplitView()
+    private let runner = NexusRunner()
+    private let transactionStore = TaskTransactionStore.shared
+    private let recovery = CoreRecoveryCoordinator()
+    private var selectedID: UUID?
+    private var streamingText = ""
+    private var settingsController: SettingsWindowController?
+    private var didPrepareForDisplay = false
+    private var activeTransaction: TaskTransaction?
+    private var activePrompt: String?
+    private var activeApproval: TaskApproval?
+    private var activeSessionID: UUID?
+    private var activeMessageID: UUID?
+    /// Preserve the first tool failure so a later backend `end` event cannot
+    /// incorrectly turn the task into a completed run.
+    private var activeToolFailure: String?
+    private var pipeline = AgentPipelineStateMachine()
+    private var verificationInFlight = false
+    private var checkpointInFlight = false
+
+    override func loadView() {
+        let root = LayerView(fillColor: Palette.canvas)
+        root.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: AppDelegate.defaultWindowWidth,
+            height: AppDelegate.defaultWindowHeight
+        )
+        root.autoresizingMask = [.width, .height]
+        view = root
+
+        let top = topBar
+        top.translatesAutoresizingMaskIntoConstraints = false
+        let bottom = bottomBar
+        bottom.translatesAutoresizingMaskIntoConstraints = false
+        split.addSubview(sidebar)
+        split.addSubview(chat)
+        split.addSubview(workspacePanel)
+        sidebar.translatesAutoresizingMaskIntoConstraints = true
+        chat.translatesAutoresizingMaskIntoConstraints = true
+        workspacePanel.translatesAutoresizingMaskIntoConstraints = true
+        split.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
+        split.setHoldingPriority(.defaultHigh, forSubviewAt: 2)
+        chat.setContentCompressionResistancePriority(.required, for: .horizontal)
+        chat.widthAnchor.constraint(greaterThanOrEqualToConstant: split.chatMinimumWidth).isActive = true
+        let backdrop = ForestBackdropView()
+        root.addSubview(backdrop)
+        backdrop.pinEdges(to: root)
+        root.addSubview(top)
+        root.addSubview(bottom)
+        root.addSubview(split)
+        NSLayoutConstraint.activate([
+            top.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            top.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            top.topAnchor.constraint(equalTo: root.topAnchor),
+            top.heightAnchor.constraint(equalToConstant: 66),
+            bottom.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            bottom.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            bottom.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            bottom.heightAnchor.constraint(equalToConstant: 34),
+            split.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
+            split.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
+            split.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10),
+            split.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -10),
+        ])
+        workspacePanel.isHidden = false
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        sidebar.onNewTask = { [weak self] in self?.newTask() }
+        sidebar.onSelect = { [weak self] id in self?.select(id: id) }
+        sidebar.onSettings = { [weak self] in self?.openSettings() }
+        sidebar.onEcosystem = { [weak self] in self?.showWorkspace(segment: 2) }
+        sidebar.onDelete = { [weak self] id in self?.delete(id: id) }
+        chat.onProject = { [weak self] in self?.chooseProject() }
+        chat.onShowWorkspace = { [weak self] segment in
+            self?.showWorkspace(segment: segment)
+        }
+        chat.onOpenSettings = { [weak self] in self?.openSettings() }
+        chat.onRetry = { [weak self] in self?.retryLastPrompt() }
+        chat.composer.onSend = { [weak self] in self?.send() }
+        chat.composer.onStop = { [weak self] in self?.stop() }
+        bottomBar.onRestartCore = { [weak self] in self?.restartCoreManually() }
+        bottomBar.onViewCoreLog = { [weak self] in self?.openCoreLog() }
+        workspacePanel.onClose = { [weak self] in
+            self?.workspacePanel.isHidden = true
+        }
+        topBar.onSettings = { [weak self] in self?.openSettings() }
+
+        refreshSidebar()
+        if let first = store.sessions.first {
+            select(id: first.id)
+        } else {
+            newTask()
+        }
+        workspacePanel.refresh()
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        prepareForDisplay()
+    }
+
+    func prepareForDisplay() {
+        guard !didPrepareForDisplay else { return }
+        didPrepareForDisplay = true
+        // 首次进入窗口后再应用一次，避开 AppKit 在 contentView 安装期间
+        // 对 NSSplitView 做的默认 fittingSize 重排。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.view.needsLayout = true
+            self?.view.layoutSubtreeIfNeeded()
+            self?.split.layoutSubtreeIfNeeded()
+            self?.split.restoreStoredWidths()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.chat.composer.focus()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.writeLayoutProbeIfRequested()
+        }
+    }
+
+    private func writeLayoutProbeIfRequested() {
+        let environment = ProcessInfo.processInfo.environment
+        guard let reportPath = environment["NEXUS_LAYOUT_PROBE"], !reportPath.isEmpty else { return }
+        let paneFrames = split.subviews.enumerated().map { index, pane in
+            "pane[\(index)]=\(NSStringFromRect(pane.frame))"
+        }.joined(separator: "\n")
+        var hierarchyLines: [String] = []
+        var ancestor = view.superview
+        for index in 0..<4 {
+            guard let current = ancestor else {
+                hierarchyLines.append("ancestor[\(index)]=nil")
+                break
+            }
+            hierarchyLines.append(
+                "ancestor[\(index)]=\(NSStringFromClass(type(of: current))) "
+                    + "frame=\(NSStringFromRect(current.frame)) "
+                    + "bounds=\(NSStringFromRect(current.bounds)) "
+                    + "translates=\(current.translatesAutoresizingMaskIntoConstraints)"
+            )
+            ancestor = current.superview
+        }
+        let hierarchy = hierarchyLines.joined(separator: "\n")
+        let report = """
+        window=\(view.window.map { NSStringFromRect($0.frame) } ?? "nil")
+        root.frame=\(NSStringFromRect(view.frame))
+        root.bounds=\(NSStringFromRect(view.bounds))
+        \(hierarchy)
+        split.frame=\(NSStringFromRect(split.frame))
+        split.bounds=\(NSStringFromRect(split.bounds))
+        \(paneFrames)
+        sidebar.stored=\(split.sidebarWidth)
+        workspace.stored=\(split.workspaceWidth)
+        credential.state=\(SecureCredentialStore.loadState.rawValue)
+        model.hasAPIKey=\(NexusConfiguration.shared.hasAPIKey)
+        """
+        try? report.write(toFile: reportPath, atomically: true, encoding: .utf8)
+
+        guard let snapshotPath = environment["NEXUS_LAYOUT_SNAPSHOT"],
+              !snapshotPath.isEmpty,
+              !view.bounds.isEmpty,
+              let representation = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: representation)
+        if let data = representation.representation(using: .png, properties: [:]) {
+            try? data.write(to: URL(fileURLWithPath: snapshotPath), options: .atomic)
+        }
+    }
+
+    func stopRunningTask() {
+        runner.stop()
+    }
+
+    /// App lifecycle entry point. Unlike stopping a user task, this marks the
+    /// supervisor as intentionally shut down so Process termination cannot
+    /// schedule an automatic restart during Cmd+Q/window close.
+    func shutdownCore() {
+        runner.shutdown()
+    }
+
+    private func restartCoreManually() {
+        guard let session = selectedSession else {
+            bottomBar.setCoreStatus("Core 失败", color: Palette.error)
+            return
+        }
+        let messageID = activeMessageID ?? session.messages.last?.id ?? UUID()
+        runner.manualRestart { [weak self] state in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.handleCoreState(state, session: session, messageID: messageID)
+            }
+        }
+    }
+
+    private func openCoreLog() {
+        let url = CoreSupervisor.logFileURL
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? "AI Dev One Core 尚无日志。\n".write(to: url, atomically: true, encoding: .utf8)
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    func resetLayout() {
+        split.resetLayout()
+        guard let window = view.window else { return }
+        let size = NSSize(width: AppDelegate.defaultWindowWidth, height: AppDelegate.defaultWindowHeight)
+        onRequestWindowSize?(size)
+        window.setContentSize(size)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private var selectedSession: ChatSession? {
+        guard let selectedID else { return nil }
+        return store.sessions.first { $0.id == selectedID }
+    }
+
+    func refreshModelState() {
+        guard let session = selectedSession else { return }
+        applySessionState(session)
+    }
+
+    private func latestSystemError(in session: ChatSession) -> String? {
+        guard let message = session.messages.last, message.role == .system else { return nil }
+        return message.content
+    }
+
+    /// Classify actionable system failures so a late, more-specific error
+    /// cannot leave a stale cancellation card immediately above it.  Runner
+    /// termination and API rejection can arrive back-to-back; they describe
+    /// one failed task, not two independent failures.
+    private func systemErrorKind(_ message: String) -> String {
+        let lowered = message.lowercased()
+        if lowered.contains("api 配置") || lowered.contains("api key") || lowered.contains("密钥") || lowered.contains("401") || lowered.contains("unauthorized") {
+            return "model"
+        }
+        if lowered.contains("停止") || lowered.contains("取消") || lowered.contains("cancel") {
+            return "cancelled"
+        }
+        if lowered.contains("core") || lowered.contains("nexus 运行") || lowered.contains("编码代理") {
+            return "core"
+        }
+        if lowered.contains("网络") || lowered.contains("连接") || lowered.contains("超时") || lowered.contains("timeout") {
+            return "network"
+        }
+        if lowered.contains("验证失败") || lowered.contains("测试失败") {
+            return "verification"
+        }
+        return "generic"
+    }
+
+    private func modelState(for session: ChatSession) -> ModelState {
+        let configuration = NexusConfiguration.shared
+        guard configuration.hasAPIKey else { return .missingKey }
+        let model = configuration.value(named: "model", inSection: "model.openai-coding") ?? ""
+        let endpoint = configuration.value(named: "base_url", inSection: "model.openai-coding") ?? ""
+        guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let url = URL(string: endpoint),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            return .configurationError
+        }
+        guard let error = latestSystemError(in: session)?.lowercased() else { return .ready }
+        if error.contains("密钥") || error.contains("api key") || error.contains("unauthorized") || error.contains("401") {
+            return .unauthorized
+        }
+        if error.contains("429") || error.contains("额度") || error.contains("频繁") {
+            return .rateLimited
+        }
+        if error.contains("网络") || error.contains("连接") || error.contains("超时") || error.contains("timeout") {
+            return .offline
+        }
+        return .ready
+    }
+
+    private func applySessionState(_ session: ChatSession) {
+        guard BackendLocator.wrapperURL != nil else {
+            chat.setStatus("Core disconnected", color: Palette.error)
+            bottomBar.setCoreStatus("Core 已断开", color: Palette.error)
+            bottomBar.setModelStatus("模型状态未知", color: Palette.secondaryText)
+            bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            chat.composer.setModelConfigured(false)
+            chat.setAgentStage("Idle")
+            return
+        }
+        bottomBar.setCoreStatus("Rust Core", color: Palette.success)
+        if let error = latestSystemError(in: session),
+           error.contains("没有找到 Nexus") || error.contains("无法启动 Nexus") {
+            chat.setStatus("Core disconnected", color: Palette.error)
+            bottomBar.setCoreStatus("Core 已断开", color: Palette.error)
+            bottomBar.setModelStatus("模型状态未知", color: Palette.secondaryText)
+            bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            chat.composer.setModelConfigured(false)
+            chat.setAgentStage("Idle")
+            return
+        }
+        let state = modelState(for: session)
+        if let error = latestSystemError(in: session), state == .ready {
+            let cancelled = error.contains("停止") || error.localizedCaseInsensitiveContains("cancel")
+            chat.setStatus(cancelled ? "已取消" : "任务失败", color: cancelled ? Palette.warning : Palette.error)
+            bottomBar.setModelStatus("模型就绪", color: Palette.success)
+            bottomBar.setAgentStatus(cancelled ? "Agent 已取消" : "Agent 失败", color: cancelled ? Palette.warning : Palette.error)
+            chat.composer.setModelConfigured(true)
+            chat.setAgentStage(cancelled ? "Idle" : "Failed")
+            return
+        }
+
+        switch state {
+        case .ready:
+            chat.setStatus("● Agent Idle", color: Palette.success)
+            bottomBar.setModelStatus("模型就绪", color: Palette.success)
+            bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            chat.composer.setModelConfigured(true)
+            chat.setAgentStage("Idle")
+        case .missingKey, .configurationError, .unauthorized:
+            chat.setStatus("API 配置异常", color: Palette.warning)
+            bottomBar.setModelStatus("模型配置异常", color: Palette.warning)
+            bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            chat.composer.setModelConfigured(false)
+            chat.setAgentStage("Idle")
+        case .rateLimited:
+            chat.setStatus("模型请求受限", color: Palette.warning)
+            bottomBar.setModelStatus("模型请求受限", color: Palette.warning)
+            bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            chat.composer.setModelConfigured(false)
+            chat.setAgentStage("Idle")
+        case .offline:
+            chat.setStatus("模型接口离线", color: Palette.warning)
+            bottomBar.setModelStatus("模型接口离线", color: Palette.warning)
+            bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            chat.composer.setModelConfigured(false)
+            chat.setAgentStage("Idle")
+        }
+    }
+
+    private func refreshSidebar() {
+        sidebar.allSessionsValue = store.sessions
+        sidebar.select(id: selectedID)
+    }
+
+    private func defaultProjectPath() -> String {
+        if let saved = UserDefaults.standard.string(forKey: "默认项目目录"),
+           FileManager.default.fileExists(atPath: saved) {
+            return saved
+        }
+        if let bundled = Bundle.main.object(forInfoDictionaryKey: "NexusDefaultProjectPath") as? String,
+           FileManager.default.fileExists(atPath: bundled) {
+            return bundled
+        }
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return documents.path
+    }
+
+    private func newTask() {
+        guard !runner.isRunning else {
+            chat.setStatus("请先停止当前任务", color: Palette.warning)
+            return
+        }
+        let session = store.create(projectPath: defaultProjectPath())
+        selectedID = session.id
+        sidebar.clearSearch()
+        refreshSidebar()
+        chat.display(session: session)
+        workspacePanel.projectPath = session.projectPath
+        applySessionState(session)
+        chat.composer.focus()
+    }
+
+    private func select(id: UUID) {
+        guard !runner.isRunning || id == selectedID else {
+            chat.setStatus("任务运行中，停止后可切换", color: Palette.warning)
+            sidebar.select(id: selectedID)
+            return
+        }
+        guard let session = store.sessions.first(where: { $0.id == id }) else { return }
+        selectedID = id
+        sidebar.select(id: id)
+        chat.display(session: session)
+        workspacePanel.projectPath = session.projectPath
+        applySessionState(session)
+    }
+
+    private func delete(id: UUID) {
+        guard !runner.isRunning else { return }
+        store.remove(id: id)
+        if selectedID == id {
+            selectedID = nil
+            if let next = store.sessions.first {
+                select(id: next.id)
+            } else {
+                newTask()
+                return
+            }
+        }
+        refreshSidebar()
+    }
+
+    private func chooseProject() {
+        guard !runner.isRunning, var session = selectedSession else { return }
+        let panel = NSOpenPanel()
+        panel.title = "选择项目文件夹"
+        panel.prompt = "选择"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: session.projectPath, isDirectory: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        session.projectPath = url.path
+        session.backendSessionID = UUID().uuidString.lowercased()
+        session.backendCreated = false
+        session.updatedAt = Date()
+        store.update(session)
+        UserDefaults.standard.set(url.path, forKey: "默认项目目录")
+        refreshSidebar()
+        chat.display(session: session)
+        workspacePanel.projectPath = session.projectPath
+        chat.setStatus("项目已切换", color: Palette.success)
+    }
+
+    private func openSettings() {
+        if settingsController == nil {
+            let controller = SettingsWindowController()
+            controller.onSaved = { [weak self] in
+                guard let self else { return }
+                if let session = self.selectedSession {
+                    self.applySessionState(session)
+                } else {
+                    self.chat.setStatus("设置已保存", color: Palette.success)
+                }
+            }
+            controller.onResetLayout = { [weak self] in
+                self?.resetLayout()
+            }
+            settingsController = controller
+        }
+        settingsController?.showWindow(nil)
+        settingsController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func showWorkspace(segment: Int) {
+        guard let session = selectedSession else { return }
+        workspacePanel.projectPath = session.projectPath
+        workspacePanel.isHidden = false
+        workspacePanel.select(segment: segment)
+        view.window?.setFrame(
+            NSRect(
+                origin: view.window?.frame.origin ?? .zero,
+                size: NSSize(
+                    width: max(view.window?.frame.width ?? 0, 1120),
+                    height: view.window?.frame.height ?? 720
+                )
+            ),
+            display: true,
+            animate: true
+        )
+    }
+
+    private func send(promptOverride: String? = nil, appendUserMessage: Bool = true) {
+        guard !runner.isRunning, activeTransaction == nil, !checkpointInFlight,
+              let session = selectedSession else { return }
+        let prompt = (promptOverride ?? chat.composer.text).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        guard FileManager.default.fileExists(atPath: session.projectPath) else {
+            chat.setStatus("项目目录不存在，请重新选择", color: NSColor.systemRed)
+            chooseProject()
+            return
+        }
+        guard NexusConfiguration.shared.hasAPIKey else {
+            chat.setStatus("请先在设置中填写 DeepSeek API 密钥", color: Palette.warning)
+            openSettings()
+            return
+        }
+        guard let approval = requestTaskApproval() else { return }
+
+        // A project snapshot can traverse thousands of files, especially when
+        // the project lives on the external development volume. Keep all of
+        // that file-system work off the AppKit thread so the approval action
+        // closes immediately and the user sees progress instead of a frozen UI.
+        checkpointInFlight = true
+        chat.composer.setRunning(true)
+        chat.setStatus("正在创建任务快照…", color: Palette.accent)
+        bottomBar.setAgentStatus("准备任务", color: Palette.accent)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let checkpoint = try CheckpointManager.shared.create(projectPath: session.projectPath)
+                DispatchQueue.main.async {
+                    guard let self, self.checkpointInFlight else { return }
+                    self.checkpointInFlight = false
+                    self.beginTask(
+                        prompt: prompt,
+                        session: session,
+                        approval: approval,
+                        checkpoint: checkpoint,
+                        appendUserMessage: appendUserMessage
+                    )
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self, self.checkpointInFlight else { return }
+                    self.checkpointInFlight = false
+                    self.chat.composer.setRunning(false)
+                    self.chat.setStatus("无法创建任务 checkpoint：\(error.localizedDescription)", color: Palette.error)
+                    self.bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+                }
+            }
+        }
+    }
+
+    private func beginTask(
+        prompt: String,
+        session: ChatSession,
+        approval: TaskApproval,
+        checkpoint: CheckpointRecord,
+        appendUserMessage: Bool
+    ) {
+        var session = session
+
+        if appendUserMessage {
+            let userMessage = ChatMessage(role: .user, content: prompt)
+            session.messages.append(userMessage)
+            if session.title == "新任务" {
+                let compact = prompt.replacingOccurrences(of: "\n", with: " ")
+                session.title = compact.count > 22 ? String(compact.prefix(22)) + "…" : compact
+            }
+            chat.addMessage(userMessage)
+        }
+        session.updatedAt = Date()
+        store.update(session)
+        refreshSidebar()
+        chat.headerTitle.stringValue = session.title
+        chat.composer.text = ""
+
+        let assistant = ChatMessage(role: .assistant, content: "")
+        session.messages.append(assistant)
+        store.update(session)
+        chat.addMessage(
+            ChatMessage(id: assistant.id, role: .assistant, content: "Architect · Planning architecture", createdAt: assistant.createdAt),
+            isStreaming: true
+        )
+        streamingText = ""
+        pipeline.reset()
+        _ = pipeline.start(.architect)
+        var transaction = TaskTransaction(
+            sessionId: session.id.uuidString.lowercased(),
+            projectPath: session.projectPath,
+            checkpointId: checkpoint.id
+        )
+        transaction.transition(to: .planning)
+        transaction.agentStages.append("Architect: planning")
+        transaction.pipeline = pipeline.snapshot
+        transactionStore.upsert(transaction)
+        activeTransaction = transaction
+        activePrompt = prompt
+        activeApproval = approval
+        activeSessionID = session.id
+        activeMessageID = assistant.id
+        activeToolFailure = nil
+        recovery.reset()
+        chat.composer.setRunning(true)
+        chat.setStatus("● Planning", color: Palette.accent)
+        bottomBar.setAgentStatus("Planning", color: Palette.accent)
+        chat.setAgentStage("Planning")
+
+        let requestSession = session
+        startRunner(prompt: prompt, session: requestSession, approval: approval, messageID: assistant.id)
+    }
+
+    private func startRunner(prompt: String, session: ChatSession, approval: TaskApproval, messageID: UUID) {
+        runner.send(prompt: prompt, session: session, approval: approval) { [weak self] event in
+            // stdout is parsed on NexusRunner's serial background queue. All
+            // state mutations and AppKit view updates must return to the main
+            // thread, otherwise a successful Core response can be invisible
+            // or make the composer appear stuck after approval.
+            DispatchQueue.main.async {
+                self?.handle(event: event, sessionID: session.id, messageID: messageID)
+            }
+        }
+    }
+
+    private func retryLastPrompt() {
+        guard !runner.isRunning, activeTransaction == nil, !checkpointInFlight, let session = selectedSession,
+              let prompt = session.messages.last(where: { $0.role == .user })?.content,
+              !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        send(promptOverride: prompt, appendUserMessage: false)
+    }
+
+    private func requestTaskApproval() -> TaskApproval? {
+        let alert = NSAlert()
+        alert.messageText = "允许 Nexus 执行这个任务吗？"
+        alert.informativeText = "允许后，Nexus 可以在当前项目内读取和编辑文件、运行命令。沙盒仍会限制项目外的写入。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "允许本次任务")
+        alert.addButton(withTitle: "仅分析，不修改")
+        alert.addButton(withTitle: "取消")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return .allowWorkspace
+        case .alertSecondButtonReturn:
+            return .readOnly
+        default:
+            return nil
+        }
+    }
+
+    private func handle(event: RunnerEvent, sessionID: UUID, messageID: UUID) {
+        guard var session = store.sessions.first(where: { $0.id == sessionID }) else { return }
+        switch event {
+        case .coreState(let state):
+            handleCoreState(state, session: session, messageID: messageID)
+        case .text(let chunk):
+            recovery.reset()
+            updateTransaction { transaction in
+                if transaction.finalState == .planning { transaction.transition(to: .building) }
+            }
+            streamingText += chunk
+            if let index = session.messages.firstIndex(where: { $0.id == messageID }) {
+                session.messages[index].content = streamingText
+                session.updatedAt = Date()
+                store.update(session)
+            }
+            chat.updateStreamingText(streamingText)
+        case .thought(let thought):
+            recovery.reset()
+            let short = thought.trimmingCharacters(in: .whitespacesAndNewlines)
+            let state = short.isEmpty ? "Thinking" : short
+            chat.setStatus("● " + state, color: Palette.accent)
+            bottomBar.setAgentStatus(state, color: Palette.accent)
+            chat.setAgentStage(state.lowercased().contains("plan") ? "Planning" : "Thinking")
+            updateTransaction { transaction in
+                transaction.agentStages.append("Architect: \(state)")
+            }
+        case .tool(let id, let title, let status, let detail):
+            recovery.reset()
+            let display = localizedToolTitle(title, status: status, detail: detail)
+            if let index = session.messages.firstIndex(where: { $0.toolID == id }) {
+                session.messages[index].content = display
+                session.messages[index].toolStatus = status
+            } else {
+                session.messages.append(
+                    ChatMessage(
+                        role: .tool,
+                        content: display,
+                        toolID: id,
+                        toolStatus: status
+                    )
+                )
+            }
+            session.updatedAt = Date()
+            store.update(session)
+            chat.display(session: session, streamingMessageID: messageID)
+            let stage = agentStage(for: title)
+            chat.setStatus("● " + stage.name, color: stage.color)
+            bottomBar.setAgentStatus(stage.name, color: stage.color)
+            chat.setAgentStage(stage.name)
+            updatePipeline(for: stage.name, status: status)
+            updateTransaction { transaction in
+                let auditDetail = detail.map { " — \($0)" } ?? ""
+                transaction.toolCalls.append("\(title): \(status)\(auditDetail)")
+            }
+            if status.localizedCaseInsensitiveContains("fail") {
+                let reason = detail ?? "工具执行失败，任务未完成。"
+                activeToolFailure = localizedToolFailure(reason, action: title)
+                chat.setStatus("工具执行失败", color: Palette.error)
+                bottomBar.setAgentStatus("Agent 失败", color: Palette.error)
+                chat.setAgentStage("Failed")
+                updateTransaction { transaction in
+                    transaction.transition(to: .failed)
+                    transaction.agentStages.append("Tool failed: \(reason)")
+                }
+            }
+        case .plan(let plan):
+            recovery.reset()
+            session.messages.append(
+                ChatMessage(role: .tool, content: "计划已更新\n\(plan)")
+            )
+            session.updatedAt = Date()
+            store.update(session)
+            chat.display(session: session, streamingMessageID: messageID)
+            chat.setStatus("● Planning", color: Palette.accent)
+            bottomBar.setAgentStatus("Planning", color: Palette.accent)
+            chat.setAgentStage("Planning")
+            updateTransaction { transaction in
+                transaction.agentStages.append("Architect: plan updated")
+            }
+        case .ended(let backendID):
+            if let toolFailure = activeToolFailure {
+                updateTransaction { transaction in
+                    transaction.transition(to: .failed)
+                    transaction.agentStages.append("Task stopped after tool failure")
+                }
+                finishFailure(toolFailure, session: session, messageID: messageID)
+                activeTransaction = nil
+                clearActiveTask()
+                verificationInFlight = false
+                return
+            }
+            if let backendID, !backendID.isEmpty {
+                session.backendSessionID = backendID
+            }
+            session.backendCreated = true
+            session.updatedAt = Date()
+            store.update(session)
+            beginVerification(session: session, messageID: messageID)
+        case .failed(let message):
+            recovery.reset()
+            let cancelled = message.contains("停止") || message.localizedCaseInsensitiveContains("cancel")
+            updateTransaction { transaction in
+                transaction.transition(to: cancelled ? .cancelled : .failed)
+            }
+            finishFailure(message, session: session, messageID: messageID)
+            activeTransaction = nil
+            clearActiveTask()
+            verificationInFlight = false
+        }
+    }
+
+    private func handleCoreState(_ state: CoreState, session: ChatSession, messageID: UUID) {
+        switch state {
+        case .stopped:
+            bottomBar.setCoreStatus("Core 已停止", color: Palette.secondaryText)
+            chat.setStatus("Core 已停止", color: Palette.secondaryText)
+        case .starting:
+            bottomBar.setCoreStatus("Rust Core", color: Palette.warning)
+            chat.setStatus("正在启动 Core", color: Palette.warning)
+        case .ready:
+            bottomBar.setCoreStatus("Rust Core", color: Palette.success)
+            if activeTransaction == nil {
+                chat.setStatus("Core 已恢复，可重新运行任务", color: Palette.success)
+                bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            }
+        case .restarting:
+            bottomBar.setCoreStatus("Core 重启中", color: Palette.warning)
+            chat.setStatus("Core 正在恢复", color: Palette.warning)
+        case .disconnected:
+            bottomBar.setCoreStatus("Core 已断开", color: Palette.error)
+            if activeTransaction != nil {
+                chat.setStatus("Core 已断开，任务已中断，正在恢复 Core", color: Palette.warning)
+                updateTransaction { transaction in
+                    transaction.transition(to: .interrupted)
+                    transaction.agentStages.append("Core disconnected")
+                    transaction.pipeline = pipeline.snapshot
+                }
+                // Do not resend the old prompt. Persist interruption first,
+                // then make the normal retry action available to the user.
+                finishFailure("Core 已断开，当前任务已中断。Core 恢复后可重新运行任务。", session: session, messageID: messageID)
+                activeTransaction = nil
+                clearActiveTask()
+                verificationInFlight = false
+            } else {
+                chat.setStatus("Core disconnected", color: Palette.error)
+            }
+            runner.scheduleAutomaticRecovery { [weak self] nextState in
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    self.handleCoreState(nextState, session: session, messageID: messageID)
+                }
+            }
+        case .failed:
+            bottomBar.setCoreStatus("Core 失败", color: Palette.error)
+            chat.setStatus("Core 无法恢复", color: Palette.error)
+            bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+        }
+    }
+
+    private func beginVerification(session: ChatSession, messageID: UUID) {
+        guard !verificationInFlight, let transaction = activeTransaction else { return }
+        verificationInFlight = true
+        if pipeline.activeStage == .architect { _ = pipeline.pass(.architect) }
+        if pipeline.activeStage == nil { _ = pipeline.start(.builder) }
+        if pipeline.activeStage == .builder { _ = pipeline.pass(.builder) }
+        if pipeline.activeStage == nil { _ = pipeline.start(.verifier) }
+        updateTransaction { current in
+            current.transition(to: .testing)
+            current.agentStages.append("Verifier: testing")
+            current.pipeline = pipeline.snapshot
+        }
+        chat.setStatus("● Verifier · 正在验证", color: Palette.accent)
+        bottomBar.setAgentStatus("Agent 运行中", color: Palette.accent)
+        VerificationGate.evaluateAsync(projectPath: session.projectPath) { [weak self] report in
+            guard let self else { return }
+            self.verificationInFlight = false
+            guard self.activeTransaction?.taskId == transaction.taskId,
+                  var latest = self.store.sessions.first(where: { $0.id == session.id }) else { return }
+            self.updateTransaction { current in
+                current.verification = report.checks
+                current.pipeline = self.pipeline.snapshot
+            }
+            if report.hasFailure {
+                _ = self.pipeline.fail(.verifier)
+                self.updateTransaction { current in
+                    current.pipeline = self.pipeline.snapshot
+                    current.transition(to: .failed)
+                }
+                self.finishFailure("验证失败：请查看任务验证结果后修复问题。", session: latest, messageID: messageID)
+                self.activeTransaction = nil
+                self.clearActiveTask()
+                return
+            }
+            _ = self.pipeline.pass(.verifier)
+            if self.pipeline.activeStage == nil { _ = self.pipeline.start(.reviewer) }
+            if self.pipeline.activeStage == .reviewer { _ = self.pipeline.pass(.reviewer) }
+            let pipelinePassed = self.pipeline.canComplete
+            self.updateTransaction { current in
+                current.pipeline = self.pipeline.snapshot
+                current.agentStages.append("Reviewer: review passed")
+                current.transition(to: pipelinePassed ? .completed : .failed)
+            }
+            guard pipelinePassed else {
+                self.finishFailure("Agent 流水线未完成 Verifier/Reviewer 验证。", session: latest, messageID: messageID)
+                self.activeTransaction = nil
+                self.clearActiveTask()
+                return
+            }
+            if let index = latest.messages.firstIndex(where: { $0.id == messageID }), latest.messages[index].content.isEmpty {
+                latest.messages[index].content = report.checks.contains(where: { $0.status == .pass })
+                    ? "任务已完成，验证通过。"
+                    : "任务已完成，验证项均已跳过。"
+            }
+            latest.updatedAt = Date()
+            self.store.update(latest)
+            self.finishRun(status: "已完成", color: Palette.success)
+            self.activeTransaction = nil
+            self.clearActiveTask()
+        }
+    }
+
+    private func finishFailure(_ message: String, session: ChatSession, messageID: UUID) {
+        var latest = session
+        latest.messages.removeAll { $0.id == messageID && $0.content.isEmpty }
+        let newKind = systemErrorKind(message)
+        if let previousIndex = latest.messages.lastIndex(where: { $0.role == .system }) {
+            let previousKind = systemErrorKind(latest.messages[previousIndex].content)
+            if newKind == "model", previousKind == "cancelled" {
+                // A process exit can report "任务已停止" just before the
+                // backend exposes the actual 401/configuration failure.
+                // Keep only the actionable model error card.
+                latest.messages.remove(at: previousIndex)
+            } else if newKind == previousKind {
+                latest.messages[previousIndex].content = message
+            } else {
+                latest.messages.append(ChatMessage(role: .system, content: message))
+            }
+        } else {
+            latest.messages.append(ChatMessage(role: .system, content: message))
+        }
+        latest.updatedAt = Date()
+        store.update(latest)
+        chat.finishStreaming()
+        chat.display(session: latest)
+        chat.composer.setRunning(false)
+        applySessionState(latest)
+        refreshSidebar()
+        if !workspacePanel.isHidden { workspacePanel.refresh() }
+        chat.composer.focus()
+    }
+
+    private func updateTransaction(_ update: (inout TaskTransaction) -> Void) {
+        guard var transaction = activeTransaction else { return }
+        update(&transaction)
+        activeTransaction = transaction
+        transactionStore.upsert(transaction)
+    }
+
+    private func clearActiveTask() {
+        activePrompt = nil
+        activeApproval = nil
+        activeSessionID = nil
+        activeMessageID = nil
+        activeToolFailure = nil
+    }
+
+    private func updatePipeline(for stageName: String, status: String) {
+        let lowered = stageName.lowercased()
+        let target: AgentStageName
+        if lowered.contains("test") { target = .verifier }
+        else if lowered.contains("review") || lowered.contains("search") { target = .reviewer }
+        else if lowered.contains("edit") || lowered.contains("run") { target = .builder }
+        else { target = .architect }
+        if target != .architect, pipeline.activeStage == .architect { _ = pipeline.pass(.architect) }
+        if target == .verifier, pipeline.activeStage == .builder { _ = pipeline.pass(.builder) }
+        if target == .reviewer, pipeline.activeStage == .builder { _ = pipeline.pass(.builder); _ = pipeline.start(.verifier); _ = pipeline.pass(.verifier) }
+        if pipeline.activeStage == nil { _ = pipeline.start(target) }
+        if status.lowercased().contains("complete"), pipeline.activeStage == target { _ = pipeline.pass(target) }
+        updateTransaction { transaction in
+            transaction.pipeline = pipeline.snapshot
+            transaction.agentStages.append("\(target.rawValue): \(status)")
+        }
+    }
+
+    private func finishRun(status: String, color: NSColor) {
+        chat.finishStreaming()
+        chat.composer.setRunning(false)
+        chat.setStatus(status, color: color)
+        bottomBar.setModelStatus("模型就绪", color: Palette.success)
+        bottomBar.setAgentStatus(status == "已完成" ? "Agent 完成" : status, color: color)
+        chat.setAgentStage(status == "已完成" ? "Completed" : "Reviewing")
+        refreshSidebar()
+        if !workspacePanel.isHidden {
+            workspacePanel.refresh()
+        }
+        chat.composer.focus()
+    }
+
+    private func stop() {
+        if checkpointInFlight {
+            checkpointInFlight = false
+            chat.composer.setRunning(false)
+            chat.setStatus("任务已取消", color: Palette.secondaryText)
+            bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            return
+        }
+        chat.setStatus("正在停止", color: Palette.warning)
+        runner.stop()
+    }
+
+    private func localizedToolTitle(_ title: String, status: String, detail: String? = nil) -> String {
+        let lowered = title.lowercased()
+        let action: String
+        if lowered.contains("read") {
+            action = "读取"
+        } else if lowered.contains("edit") || lowered.contains("write") {
+            action = "编辑"
+        } else if lowered.contains("bash") || lowered.contains("command") || lowered.contains("terminal") {
+            action = "运行命令"
+        } else if lowered.contains("search") || lowered.contains("grep") {
+            action = "搜索"
+        } else if lowered.contains("test") {
+            action = "运行测试"
+        } else {
+            action = title
+        }
+        let loweredStatus = status.lowercased()
+        if loweredStatus.contains("complete") {
+            return "已完成：\(action)"
+        }
+        if loweredStatus.contains("fail") {
+            return localizedToolFailure(detail ?? "工具执行失败", action: title)
+        }
+        return "正在执行：\(action)"
+    }
+
+    private func localizedToolFailure(_ detail: String, action title: String) -> String {
+        let safeDetail = redactDisplayText(detail)
+        let lowered = safeDetail.lowercased()
+        if lowered.contains("user cancelled") || lowered.contains("permission") || lowered.contains("授权") {
+            return "未获得命令授权：\(localizedAction(title))"
+        }
+        if lowered.contains("network") || lowered.contains("connection") || lowered.contains("curl") || lowered.contains("网络") {
+            return safeDetail.isEmpty
+                ? "网络命令执行失败：\(localizedAction(title))"
+                : "网络命令执行失败：\(safeDetail)"
+        }
+        return safeDetail.isEmpty
+            ? "执行失败：\(localizedAction(title))"
+            : "执行失败：\(localizedAction(title)) — \(safeDetail)"
+    }
+
+    private func localizedAction(_ title: String) -> String {
+        let lowered = title.lowercased()
+        if lowered.contains("read") { return "读取" }
+        if lowered.contains("edit") || lowered.contains("write") { return "编辑" }
+        if lowered.contains("bash") || lowered.contains("command") || lowered.contains("terminal") { return "运行命令" }
+        if lowered.contains("search") || lowered.contains("grep") { return "搜索" }
+        if lowered.contains("test") { return "运行测试" }
+        return title
+    }
+
+    private func redactDisplayText(_ value: String) -> String {
+        let cleaned = value
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.count <= 180 { return cleaned }
+        return String(cleaned.prefix(180)) + "…"
+    }
+
+    private func agentStage(for title: String) -> (name: String, color: NSColor) {
+        let lowered = title.lowercased()
+        if lowered.contains("test") || lowered.contains("check") {
+            return ("Testing", Palette.success)
+        }
+        if lowered.contains("bash") || lowered.contains("command") || lowered.contains("terminal") {
+            return ("Running", Palette.blue)
+        }
+        if lowered.contains("read") || lowered.contains("search") || lowered.contains("grep") {
+            return ("Reviewing", Palette.violet)
+        }
+        if lowered.contains("edit") || lowered.contains("write") || lowered.contains("patch") {
+            return ("Editing", Palette.accent)
+        }
+        return ("Thinking", Palette.accent)
+    }
+}
+
+// MARK: - 应用入口
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    static let defaultWindowWidth: CGFloat = 1440
+    static let defaultWindowHeight: CGFloat = 900
+    static let minimumWindowWidth: CGFloat = 1180
+    static let minimumWindowHeight: CGFloat = 720
+    private static let windowFrameStorageKey = "ai-dev-one.window-frame"
+
+    private var window: NSWindow?
+    private var mainController: MainViewController?
+    private var preferredWindowSize = NSSize(
+        width: AppDelegate.defaultWindowWidth,
+        height: AppDelegate.defaultWindowHeight
+    )
+    private var enforcingWindowBounds = false
+    private var userIsResizingWindow = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // 升级自早期版本时，将 TOML 中的旧明文密钥迁移到 macOS 钥匙串。
+        NexusConfiguration.shared.hardenPermissions()
+        NexusConfiguration.shared.migrateLegacyAPIKeyIfNeeded()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.applicationIconImage = makeApplicationIcon()
+
+        let controller = MainViewController()
+        controller.preferredContentSize = NSSize(
+            width: Self.defaultWindowWidth,
+            height: Self.defaultWindowHeight
+        )
+        let restoredFrame = validatedSavedWindowFrame()
+        let initialWindowFrame = restoredFrame ?? defaultCenteredWindowFrame()
+        let window = NSWindow(
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: Self.defaultWindowWidth,
+                height: Self.defaultWindowHeight
+            ),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "AI Dev One · Route 2"
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = Palette.forestBottom
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isMovableByWindowBackground = true
+        let minimumSize = NSSize(width: Self.minimumWindowWidth, height: Self.minimumWindowHeight)
+        window.minSize = minimumSize
+        window.contentMinSize = minimumSize
+        // 保留系统原生 contentView 作为 NSWindow 尺寸边界。隔离宿主只作为
+        // frame/autoresize 子视图存在，三栏 fittingSize 无法再传播到窗口。
+        let contentContainer: NSView
+        if let existingContentView = window.contentView {
+            contentContainer = existingContentView
+        } else {
+            let fallbackContentView = NSView(frame: NSRect(origin: .zero, size: initialWindowFrame.size))
+            window.contentView = fallbackContentView
+            contentContainer = fallbackContentView
+        }
+        let host = WindowContentHostView(
+            hostedView: controller.view,
+            frameSize: contentContainer.bounds.size
+        )
+        host.translatesAutoresizingMaskIntoConstraints = false
+        host.frame = contentContainer.bounds
+        contentContainer.addSubview(host)
+        NSLayoutConstraint.activate([
+            host.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+            host.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+            host.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
+        ])
+        preferredWindowSize = initialWindowFrame.size
+        self.window = window
+        mainController = controller
+        controller.onRequestWindowSize = { [weak self] size in
+            self?.updatePreferredWindowSize(size)
+        }
+        if restoredFrame == nil {
+            UserDefaults.standard.removeObject(forKey: Self.windowFrameStorageKey)
+        }
+        window.setFrame(initialWindowFrame, display: false)
+        window.delegate = self
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
+
+        controller.prepareForDisplay()
+        SecureCredentialStore.warmup { [weak controller] in
+            controller?.refreshModelState()
+        }
+        installMainMenu()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            // 首轮窗口/Renderer 布局稳定后重新应用已验证的目标边界，确保默认
+            // 1440×900 和用户保存的合法尺寸都能被准确恢复。
+            self?.window?.setFrame(initialWindowFrame, display: true)
+            self?.enforceWindowBounds()
+            self?.saveWindowFrameIfValid()
+            self?.window?.makeKeyAndOrderFront(nil)
+            self?.window?.orderFrontRegardless()
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Cmd+Q 不一定经过 windowShouldClose；这里也显式中断当前代理，
+        // 避免退出桌面端后留下孤儿的 nexus-agent 子进程。
+        mainController?.shutdownCore()
+        return .terminateNow
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        mainController?.shutdownCore()
+        return true
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        saveWindowFrameIfValid()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        if let window,
+           window.frame.width < Self.minimumWindowWidth || window.frame.height < Self.minimumWindowHeight {
+            // 不在 AppKit 的约束布局回调内同步 setFrame，避免重入 display cycle。
+            DispatchQueue.main.async { [weak self] in
+                self?.enforceWindowBounds()
+            }
+            return
+        }
+        saveWindowFrameIfValid()
+    }
+
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        let safeSize = NSSize(
+            width: max(frameSize.width, Self.minimumWindowWidth),
+            height: max(frameSize.height, Self.minimumWindowHeight)
+        )
+        let isPointerResize = sender.inLiveResize && (NSEvent.pressedMouseButtons & 1) == 1
+        if isPointerResize {
+            userIsResizingWindow = true
+            updatePreferredWindowSize(safeSize)
+            return safeSize
+        }
+        // 约束引擎自身也会走到这里。非鼠标拖动时不接受它提出的
+        // fittingSize（历史故障值为 28px / 1180px），继续保持显式目标尺寸。
+        return preferredWindowSize
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard userIsResizingWindow else { return }
+        userIsResizingWindow = false
+        guard let window else { return }
+        updatePreferredWindowSize(window.frame.size)
+        saveWindowFrameIfValid()
+    }
+
+    func windowWillUseStandardFrame(_ window: NSWindow, defaultFrame newFrame: NSRect) -> NSRect {
+        updatePreferredWindowSize(newFrame.size)
+        return newFrame
+    }
+
+    @objc private func resetLayout() {
+        mainController?.resetLayout()
+    }
+
+    private func enforceWindowBounds() {
+        guard !enforcingWindowBounds, let window else { return }
+        var frame = window.frame
+        let preferredSize = preferredWindowSize
+        var changed = false
+        if frame.width < Self.minimumWindowWidth {
+            frame.size.width = max(Self.minimumWindowWidth, preferredSize.width)
+            changed = true
+        }
+        if frame.height < Self.minimumWindowHeight {
+            frame.size.height = max(Self.minimumWindowHeight, preferredSize.height)
+            changed = true
+        }
+        guard changed else { return }
+        enforcingWindowBounds = true
+        defer { enforcingWindowBounds = false }
+        updatePreferredWindowSize(frame.size)
+        window.setFrame(frame, display: true)
+    }
+
+    private func updatePreferredWindowSize(_ size: NSSize) {
+        let safeSize = NSSize(
+            width: max(size.width, Self.minimumWindowWidth),
+            height: max(size.height, Self.minimumWindowHeight)
+        )
+        preferredWindowSize = safeSize
+    }
+
+    private func saveWindowFrameIfValid() {
+        guard let window, isValidWindowFrame(window.frame) else { return }
+        UserDefaults.standard.set(NSStringFromRect(window.frame), forKey: Self.windowFrameStorageKey)
+    }
+
+    private func validatedSavedWindowFrame() -> NSRect? {
+        guard let raw = UserDefaults.standard.string(forKey: Self.windowFrameStorageKey),
+              !raw.isEmpty else { return nil }
+        let frame = NSRectFromString(raw)
+        guard isValidWindowFrame(frame) else {
+            UserDefaults.standard.removeObject(forKey: Self.windowFrameStorageKey)
+            return nil
+        }
+        return frame
+    }
+
+    private func defaultCenteredWindowFrame() -> NSRect {
+        let screenFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+            ?? NSRect(
+                x: 0,
+                y: 0,
+                width: Self.defaultWindowWidth,
+                height: Self.defaultWindowHeight
+            )
+        return NSRect(
+            x: screenFrame.midX - Self.defaultWindowWidth / 2,
+            y: screenFrame.midY - Self.defaultWindowHeight / 2,
+            width: Self.defaultWindowWidth,
+            height: Self.defaultWindowHeight
+        )
+    }
+
+    private func isValidWindowFrame(_ frame: NSRect) -> Bool {
+        guard frame.origin.x.isFinite, frame.origin.y.isFinite,
+              frame.width.isFinite, frame.height.isFinite,
+              frame.width >= Self.minimumWindowWidth,
+              frame.height >= Self.minimumWindowHeight else {
+            return false
+        }
+
+        let screens = NSScreen.screens
+        let maximumScreenWidth = screens.map { $0.frame.width }.max() ?? 0
+        let maximumScreenHeight = screens.map { $0.frame.height }.max() ?? 0
+        guard !screens.isEmpty,
+              frame.width <= maximumScreenWidth,
+              frame.height <= maximumScreenHeight else {
+            return false
+        }
+        return screens.contains { $0.visibleFrame.intersects(frame) }
+    }
+
+    private func installMainMenu() {
+        let main = NSMenu()
+        let appItem = NSMenuItem()
+        main.addItem(appItem)
+        let appMenu = NSMenu()
+        appItem.submenu = appMenu
+        appMenu.addItem(withTitle: "关于 Nexus", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let resetItem = NSMenuItem(title: "重置界面布局", action: #selector(resetLayout), keyEquivalent: "0")
+        resetItem.keyEquivalentModifierMask = [.command, .shift]
+        resetItem.target = self
+        appMenu.addItem(resetItem)
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "退出 Nexus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        let editItem = NSMenuItem()
+        main.addItem(editItem)
+        let editMenu = NSMenu(title: "编辑")
+        editItem.submenu = editMenu
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "复制", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        NSApp.mainMenu = main
+    }
+
+    private func makeApplicationIcon() -> NSImage {
+        let size = NSSize(width: 512, height: 512)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let outer = NSBezierPath(roundedRect: NSRect(x: 28, y: 28, width: 456, height: 456), xRadius: 112, yRadius: 112)
+        NSColor(calibratedRed: 0.025, green: 0.28, blue: 0.30, alpha: 1).setFill()
+        outer.fill()
+        let inner = NSBezierPath(roundedRect: NSRect(x: 45, y: 45, width: 422, height: 422), xRadius: 102, yRadius: 102)
+        NSColor(calibratedRed: 0.06, green: 0.58, blue: 0.56, alpha: 1).setFill()
+        inner.fill()
+        let text = "N"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 270, weight: .bold),
+            .foregroundColor: NSColor.white,
+        ]
+        let textSize = text.size(withAttributes: attributes)
+        text.draw(
+            at: NSPoint(x: (size.width - textSize.width) / 2, y: (size.height - textSize.height) / 2 - 7),
+            withAttributes: attributes
+        )
+        image.unlockFocus()
+        return image
+    }
+}
+
+let application = NSApplication.shared
+let applicationDelegate = AppDelegate()
+application.delegate = applicationDelegate
+application.run()
