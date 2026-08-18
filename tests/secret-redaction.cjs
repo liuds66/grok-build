@@ -26,10 +26,22 @@ const runtimeFiles = [
   ...collectJsonl(path.join(nexusHome, 'sessions')),
 ].filter(fs.existsSync);
 
-// Require a realistic token length so ordinary paths such as `task-allow`
-// are not mistaken for credentials while real provider keys are still caught.
-const credentialLike = /(?:sk-|xai-)[A-Za-z0-9_-]{16,}/i;
+// Require a provider-shaped, contiguous key body and a non-word boundary.
+// Repository paths routinely contain names such as `xai-grok-shell` and
+// `task-transaction`; treating those hyphenated identifiers as credentials
+// makes the release gate unusable after a normal list_dir call.  DeepSeek and
+// xAI keys use a long alphanumeric body, while OpenAI project keys may include
+// the literal `proj-` segment.
+const credentialLike = /(?:^|[^A-Za-z0-9])(?:sk-(?:proj-)?|xai-)[A-Za-z0-9]{20,}(?![A-Za-z0-9])/i;
 const bearerLike = /bearer\s+[A-Za-z0-9._~+\-/=]{8,}/i;
+
+// Regression guards for the detector itself. These are synthetic values and
+// never written to runtime files or printed.
+assert.equal(credentialLike.test(`sk-${'a'.repeat(32)}`), true);
+assert.equal(credentialLike.test(`sk-proj-${'b'.repeat(32)}`), true);
+assert.equal(credentialLike.test(`xai-${'c'.repeat(32)}`), true);
+assert.equal(credentialLike.test('/crates/xai-grok-shell-session-support/'), false);
+assert.equal(credentialLike.test('/tests/task-transaction-harness.swift'), false);
 const leaks = [];
 for (const file of runtimeFiles) {
   const content = fs.readFileSync(file, 'utf8');

@@ -64,6 +64,17 @@ check "Git 补丁格式" git -C "${repo_root}" diff --check
 check "桌面端 Swift 类型检查" swiftc -typecheck -framework AppKit -framework Foundation -framework LocalAuthentication -framework Security \
   -module-cache-path "${swift_module_cache}" \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop"/*.swift
+check "Project Intelligence Swift 类型检查" swiftc -typecheck -framework Foundation \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/ProjectIntelligence.swift"
+project_intelligence_node="${NEXUS_NODE_BIN:-${home_dir}/Library/Application Support/AI Dev One Installer/toolchains/node/bin/node}"
+if [[ -x "${project_intelligence_node}" ]]; then
+  check "Project Intelligence 扫描/增量/上下文回归" "${project_intelligence_node}" \
+    "${repo_root}/tests/project-intelligence-unit.cjs"
+  check "Project Intelligence Acceptance Gate" "${project_intelligence_node}" \
+    "${repo_root}/tests/project-intelligence-acceptance.cjs"
+else
+  printf '提示  未找到 Node，跳过 Project Intelligence CJS 回归\n'
+fi
 check "分离 Core/Model/Agent/Workspace 状态" grep -q 'enum CoreState' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/CoreRecovery.swift"
 check "模型配置错误状态" grep -q 'configurationError' \
@@ -110,6 +121,26 @@ check "任务事务审计" grep -q 'TaskTransactionState' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/TaskTransaction.swift"
 check "验证门 PASS/FAIL/SKIPPED" grep -q 'VerificationStatus' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/VerificationGate.swift"
+check "Project Intelligence 服务" grep -q 'final class ProjectIntelligenceService' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/ProjectIntelligence.swift"
+check "Project Intelligence 增量索引" grep -q 'reusedFileCount' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/ProjectIntelligence.swift"
+check "Project Intelligence 安全敏感文件" grep -q 'isSensitive' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/ProjectIntelligence.swift"
+check "Project Intelligence 敏感元数据复用" grep -q 'Sensitive files are still reusable by metadata only' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/ProjectIntelligence.swift"
+check "Project Intelligence 知识脱敏" grep -q 'projectIntelligenceSanitizeKnowledge' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/ProjectIntelligence.swift"
+check "知识库项目智能 UI" grep -q 'renderProjectIntelligence' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Agent 项目上下文桥接" grep -q 'promptContext' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "项目切换查询隔离" grep -q 'expectedRequestID' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "空项目路径不扫描" grep -q 'guard !projectPath.isEmpty else' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "生态状态产品化" grep -q 'productizedEcosystemText' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
 check "危险命令 Rust deny" grep -q 'NexusPolicyRules.commandLineArguments' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
 check "Chat 最小宽度" grep -q 'chatMinimumWidth: CGFloat = 520' \

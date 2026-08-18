@@ -1,5 +1,11 @@
 import Foundation
 
+extension Notification.Name {
+    /// Project Intelligence listens to this notification to invalidate and
+    /// rebuild only the affected project after a real on-disk rollback.
+    static let nexusCheckpointDidRollback = Notification.Name("cn.ai-dev-one.checkpoint.did-rollback")
+}
+
 #if canImport(CryptoKit)
 import CryptoKit
 #endif
@@ -154,7 +160,9 @@ final class CheckpointManager {
         defer { lock.unlock() }
 
         if let git = record.git {
-            return try rollbackGit(record: record, metadata: git)
+            let verification = try rollbackGit(record: record, metadata: git)
+            NotificationCenter.default.post(name: .nexusCheckpointDidRollback, object: record.projectPath)
+            return verification
         }
 
         let expected = Set(record.files.map(\.relativePath))
@@ -223,7 +231,7 @@ final class CheckpointManager {
             }
         }
         let unexpected = finalMap.keys.filter { !expected.contains($0) }.sorted()
-        return RollbackVerification(
+        let verification = RollbackVerification(
             checkpointID: record.id,
             verified: missing.isEmpty && unexpected.isEmpty,
             restoredFiles: restored,
@@ -231,6 +239,8 @@ final class CheckpointManager {
             missingFiles: missing.sorted(),
             unexpectedFiles: unexpected
         )
+        NotificationCenter.default.post(name: .nexusCheckpointDidRollback, object: record.projectPath)
+        return verification
     }
 
     private func gitRepository(for projectURL: URL) throws -> URL? {

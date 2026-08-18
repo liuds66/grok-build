@@ -3067,10 +3067,23 @@ final class WorkspacePanelView: LayerView {
     private let commandField = NSTextField()
     private let actionButton = NSButton(title: "刷新", target: nil, action: nil)
     private let summaryLabel = label("", size: 11, color: Palette.secondaryText)
+    private let intelligence = ProjectIntelligenceService.shared
     private var runningProcess: Process?
+    private var latestIntelligence: ProjectIntelligenceOverview?
+    private var intelligenceRequestID = UUID()
 
     var projectPath: String = "" {
         didSet {
+            // Invalidate any queued index/ecosystem callbacks before handling
+            // an empty path or switching to another project.
+            intelligenceRequestID = UUID()
+            guard !projectPath.isEmpty else {
+                intelligence.stopWatching()
+                latestIntelligence = nil
+                outputView.string = "尚未选择项目。"
+                summaryLabel.stringValue = "尚未选择项目"
+                return
+            }
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             projectPathLabel.stringValue = projectPath.hasPrefix(home)
                 ? "~" + String(projectPath.dropFirst(home.count))
@@ -3084,6 +3097,21 @@ final class WorkspacePanelView: LayerView {
                 refresh()
             }
             updateProjectStats()
+            let requestID = intelligenceRequestID
+            intelligence.startWatching(projectPath: projectPath) { [weak self] overview in
+                guard let self, self.intelligenceRequestID == requestID else { return }
+                self.latestIntelligence = overview
+                if self.segmented.selectedSegment == 2 {
+                    self.renderProjectIntelligence(overview)
+                }
+            }
+            intelligence.index(projectPath: projectPath, force: false) { [weak self] overview in
+                guard let self, self.intelligenceRequestID == requestID else { return }
+                self.latestIntelligence = overview
+                if self.segmented.selectedSegment == 2 {
+                    self.renderProjectIntelligence(overview)
+                }
+            }
         }
     }
     var onClose: (() -> Void)?
@@ -3319,7 +3347,7 @@ final class WorkspacePanelView: LayerView {
         commandField.placeholderString = terminal
             ? "输入命令后按回车运行"
             : "插件地址，或：mcp add 名称 URL"
-        actionButton.title = terminal ? "运行" : (extensions ? "安装" : "刷新")
+        actionButton.title = terminal ? "运行" : (extensions ? "重新索引" : "刷新")
         summaryLabel.stringValue = [
             "查看当前 Git 工作区的文件改动",
             "浏览当前项目文件",
@@ -3543,12 +3571,74 @@ final class WorkspacePanelView: LayerView {
         scrollToTop()
     }
 
-    private func loadEcosystem() {
+    private func loadEcosystem(force: Bool = false) {
+        guard !projectPath.isEmpty else {
+            outputView.string = "尚未选择项目。"
+            return
+        }
+        summaryLabel.stringValue = "项目智能 · 正在扫描…"
+        outputView.string = "项目智能\n\n● 正在建立本地项目索引…\n\n首次扫描在后台进行，Agent 仍可继续工作。"
+        let requestID = UUID()
+        intelligenceRequestID = requestID
+        intelligence.index(projectPath: projectPath, force: force) { [weak self] overview in
+            guard let self, self.intelligenceRequestID == requestID else { return }
+            self.latestIntelligence = overview
+            self.renderProjectIntelligence(overview)
+            self.loadEcosystemServices(requestID: requestID)
+        }
+    }
+
+    private func renderProjectIntelligence(_ overview: ProjectIntelligenceOverview) {
+        guard segmented.selectedSegment == 2 else { return }
+        let body: String
+        if let index = overview.index {
+            let status = overview.status == .ready ? "● 已就绪" : "○ \(overview.status.rawValue)"
+            let stacks = index.project.frameworks.isEmpty ? "未识别" : index.project.frameworks.joined(separator: "、")
+            let last = Self.relativeDate(index.project.lastIndexedAt)
+            let warnings = index.warnings.isEmpty ? "" : "\n\n提示：\n" + index.warnings.map { "• \($0)" }.joined(separator: "\n")
+            body = """
+            项目智能
+
+            \(status)
+
+            文件        \(index.fileCount)
+            模块        \(index.moduleCount)
+            符号        \(index.symbolCount)
+            测试        \(index.testCount)
+
+            项目栈      \(stacks)
+            上次更新    \(last)
+            增量复用    \(index.reusedFileCount) 个文件
+            本次解析    \(index.changedFileCount) 个文件
+            \(warnings)
+
+            下方仍可查看 MCP、插件与技能状态。
+            """
+        } else {
+            body = "项目智能\n\n⚠ 项目索引暂不可用\n\n\(overview.error ?? "正在等待首次扫描")\n\nAgent 将回退到传统文件搜索、grep 和 read 工具。"
+        }
+        outputView.string = Self.capped(body)
+        summaryLabel.stringValue = overview.index.map { "项目智能 · \($0.fileCount) 个文件" } ?? "项目索引暂不可用"
+        scrollToTop()
+    }
+
+    private static func relativeDate(_ date: Date) -> String {
+        let seconds = max(0, Int(Date().timeIntervalSince(date)))
+        if seconds < 60 { return "刚刚" }
+        if seconds < 3600 { return "\(seconds / 60) 分钟前" }
+        if seconds < 86400 { return "\(seconds / 3600) 小时前" }
+        return "\(seconds / 86400) 天前"
+    }
+
+    private func loadEcosystemServices(requestID: UUID? = nil) {
+        let expectedRequestID = requestID ?? intelligenceRequestID
         summaryLabel.stringValue = "正在读取扩展生态…"
         runInBackground { [projectPath] in
             guard let executable = BackendLocator.bundledBinaryURL ?? BackendLocator.wrapperURL else {
                 DispatchQueue.main.async { [weak self] in
-                    self?.outputView.string = "未找到 Nexus 编码代理。"
+                    guard let self, self.intelligenceRequestID == expectedRequestID else { return }
+                    self.outputView.string = Self.capped((self.outputView.string.isEmpty ? "项目智能\n\n" : self.outputView.string + "\n\n") + "生态工具暂不可用：未找到 Nexus 编码代理。")
+                    self.summaryLabel.stringValue = self.latestIntelligence?.index.map { "项目智能 · \($0.fileCount) 个文件" } ?? "项目索引暂不可用"
                 }
                 return
             }
@@ -3576,12 +3666,12 @@ final class WorkspacePanelView: LayerView {
             let skillText = skills.isEmpty
                 ? "尚未发现技能目录。"
                 : skills.map { "• \($0)" }.joined(separator: "\n")
-            let body = """
+            let ecosystem = """
             MCP 服务器
-            \(mcp.output.isEmpty ? "尚未配置 MCP 服务器。" : mcp.output)
+            \(Self.productizedEcosystemText(mcp.output, empty: "尚未配置 MCP 服务器。"))
 
             插件
-            \(plugins.output.isEmpty ? "尚未安装插件。" : plugins.output)
+            \(Self.productizedEcosystemText(plugins.output, empty: "尚未安装插件。"))
 
             技能
             \(skillText)
@@ -3590,11 +3680,33 @@ final class WorkspacePanelView: LayerView {
             \(NexusConfiguration.shared.configURL.path)
             """
             DispatchQueue.main.async { [weak self] in
-                self?.summaryLabel.stringValue = "MCP、插件与技能"
-                self?.outputView.string = Self.capped(body)
-                self?.scrollToTop()
+                guard let self, self.intelligenceRequestID == expectedRequestID else { return }
+                let projectSection: String
+                if let index = self.latestIntelligence?.index {
+                    projectSection = "项目智能\n\n● 已就绪\n\n文件        \(index.fileCount)\n模块        \(index.moduleCount)\n符号        \(index.symbolCount)\n测试        \(index.testCount)\n\n上次更新    \(Self.relativeDate(index.project.lastIndexedAt))\n\n[重新索引]\n"
+                } else {
+                    projectSection = "项目智能\n\n⚠ 项目索引暂不可用\n\n[重新索引]\n"
+                }
+                self.summaryLabel.stringValue = self.latestIntelligence?.index.map { "项目智能 · \($0.fileCount) 个文件" } ?? "项目索引暂不可用"
+                self.outputView.string = Self.capped(projectSection + "\n" + ecosystem)
+                self.scrollToTop()
             }
         }
+    }
+
+    private static func productizedEcosystemText(_ raw: String, empty: String) -> String {
+        let clean = raw
+            .replacingOccurrences(of: #"\u001B\[[0-9;]*[A-Za-z]"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return empty }
+        let lowered = clean.lowercased()
+        if lowered.contains("no mcp servers configured") { return "尚未配置 MCP 服务器。" }
+        if lowered.contains("no plugins installed") { return "尚未安装插件。" }
+        if lowered.contains("no skills found") || lowered.contains("no skills installed") { return "尚未发现技能。" }
+        if lowered.contains("usage:") || lowered.contains("unknown command") || lowered.contains("command not found") {
+            return "生态服务暂不可用，请使用输入框配置。"
+        }
+        return clean.count > 1_200 ? String(clean.prefix(1_200)) + "…" : clean
     }
 
     @objc private func segmentChanged() {
@@ -3606,7 +3718,11 @@ final class WorkspacePanelView: LayerView {
         if segmented.selectedSegment == 3 {
             runTerminalCommand()
         } else if segmented.selectedSegment == 2 {
-            manageExtension()
+            if commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                loadEcosystem(force: true)
+            } else {
+                manageExtension()
+            }
         } else {
             refresh()
         }
@@ -5003,7 +5119,17 @@ final class MainViewController: NSViewController {
         chat.setAgentStage("Planning")
 
         let requestSession = session
-        startRunner(prompt: prompt, session: requestSession, approval: approval, messageID: assistant.id)
+        let projectContext = ProjectContextProvider.shared.promptContext(projectPath: session.projectPath, query: prompt)
+        let runnerPrompt: String
+        if projectContext.isEmpty {
+            runnerPrompt = prompt
+        } else {
+            runnerPrompt = "\(prompt)\n\n\(projectContext)\n\nUse this bounded context as a starting point. Verify against the workspace before editing."
+            updateTransaction { transaction in
+                transaction.toolCalls.append("Project Intelligence: bounded context attached")
+            }
+        }
+        startRunner(prompt: runnerPrompt, session: requestSession, approval: approval, messageID: assistant.id)
     }
 
     private func startRunner(prompt: String, session: ChatSession, approval: TaskApproval, messageID: UUID) {
@@ -5266,6 +5392,7 @@ final class MainViewController: NSViewController {
     }
 
     private func finishFailure(_ message: String, session: ChatSession, messageID: UUID) {
+        recordProjectKnowledge()
         var latest = session
         latest.messages.removeAll { $0.id == messageID && $0.content.isEmpty }
         let newKind = systemErrorKind(message)
@@ -5329,6 +5456,7 @@ final class MainViewController: NSViewController {
     }
 
     private func finishRun(status: String, color: NSColor) {
+        recordProjectKnowledge(finalState: status == "已完成" ? "completed" : nil)
         chat.finishStreaming()
         chat.composer.setRunning(false)
         chat.setStatus(status, color: color)
@@ -5340,6 +5468,45 @@ final class MainViewController: NSViewController {
             workspacePanel.refresh()
         }
         chat.composer.focus()
+    }
+
+    private func recordProjectKnowledge(finalState: String? = nil) {
+        guard let transaction = activeTransaction else { return }
+        let summary = redactKnowledge(activePrompt ?? "")
+        let checks = transaction.verification.map { check in
+            "\(redactKnowledge(check.name)): \(check.status.rawValue)"
+        }
+        let knowledge = TaskKnowledge(
+            taskId: transaction.taskId,
+            summary: summary.isEmpty ? "未命名任务" : summary,
+            filesRead: transaction.toolCalls.prefix(80).map(redactKnowledge),
+            filesChanged: transaction.fileChanges.prefix(80).map(redactKnowledge),
+            symbolsChanged: [],
+            verification: checks,
+            finalState: finalState ?? transaction.finalState.rawValue,
+            recordedAt: Date()
+        )
+        ProjectIntelligenceService.shared.recordTaskKnowledge(knowledge, projectPath: transaction.projectPath)
+    }
+
+    private func redactKnowledge(_ value: String) -> String {
+        var result = value
+        let patterns: [(String, String)] = [
+            (#"(?i)sk-[A-Za-z0-9_.*=\-]{8,}"#, "<redacted-key>"),
+            (#"(?i)xai-[A-Za-z0-9_.*=\-]{8,}"#, "<redacted-key>"),
+            (#"(?i)(bearer\s+)[A-Za-z0-9._~+\-/=]+"#, "$1<redacted-key>"),
+            (#"(?i)(api[_-]?key\s*[=:]\s*)[^\s,&]+"#, "$1<redacted-key>"),
+        ]
+        for (pattern, replacement) in patterns {
+            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+            result = expression.stringByReplacingMatches(
+                in: result,
+                options: [],
+                range: NSRange(result.startIndex..<result.endIndex, in: result),
+                withTemplate: replacement
+            )
+        }
+        return String(result.prefix(600))
     }
 
     private func stop() {
