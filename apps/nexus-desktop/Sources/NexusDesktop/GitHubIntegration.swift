@@ -853,13 +853,13 @@ final class GitHubCLIProvider: GitHubProvider {
         }
         let safeBody = GitHubRedaction.text(body, limit: 12_000)
         let safeTitle = GitHubRedaction.text(title, limit: 240)
-        ghJSON(["pr", "create", "--repo", repository.fullName, "--head", head, "--base", base, "--title", safeTitle, "--body", safeBody, "--json", "number,title,body,headRefName,baseRefName,url,state,isDraft,merged"]) { (result: Result<CLIPullRequest, Error>) in
+        ghJSON(["pr", "create", "--repo", repository.fullName, "--head", head, "--base", base, "--title", safeTitle, "--body", safeBody, "--json", "number,title,body,headRefName,baseRefName,url,state,isDraft,mergedAt"]) { (result: Result<CLIPullRequest, Error>) in
             completion(result.map { $0.model })
         }
     }
 
     func getPullRequest(repository: GitHubRepositoryBinding, number: Int, completion: @escaping GitHubCompletion<GitHubPullRequest>) {
-        ghJSON(["pr", "view", String(number), "--repo", repository.fullName, "--json", "number,title,body,headRefName,baseRefName,url,state,isDraft,merged"]) { (result: Result<CLIPullRequest, Error>) in completion(result.map(\.model)) }
+        ghJSON(["pr", "view", String(number), "--repo", repository.fullName, "--json", "number,title,body,headRefName,baseRefName,url,state,isDraft,mergedAt"]) { (result: Result<CLIPullRequest, Error>) in completion(result.map(\.model)) }
     }
 
     func updatePullRequest(repository: GitHubRepositoryBinding, number: Int, title: String?, body: String?, completion: @escaping GitHubCompletion<GitHubPullRequest>) {
@@ -1007,8 +1007,8 @@ final class GitHubCLIProvider: GitHubProvider {
         let url: String
         let state: String
         let isDraft: Bool
-        let merged: Bool
-        var model: GitHubPullRequest { GitHubPullRequest(number: number, title: GitHubRedaction.text(title, limit: 240), body: GitHubRedaction.text(body, limit: 12_000), headBranch: headRefName, baseBranch: baseRefName, url: url, state: state, isDraft: isDraft, merged: merged) }
+        let mergedAt: String?
+        var model: GitHubPullRequest { GitHubPullRequest(number: number, title: GitHubRedaction.text(title, limit: 240), body: GitHubRedaction.text(body, limit: 12_000), headBranch: headRefName, baseBranch: baseRefName, url: url, state: state, isDraft: isDraft, merged: mergedAt != nil) }
     }
 
     private struct CLICheck: Decodable { let name: String; let state: String?; let bucket: String?; let link: String?; let workflow: String? }
