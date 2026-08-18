@@ -11,6 +11,12 @@ const integrationSource = fs.readFileSync(path.join(sourceRoot, 'GitHubIntegrati
 if (!integrationSource.includes('mergedAt') || integrationSource.includes('isDraft,merged"')) {
   throw new Error('GitHub CLI PR fields must use supported mergedAt field');
 }
+const createStart = integrationSource.indexOf('func createPullRequest(');
+const createEnd = integrationSource.indexOf('func getPullRequest(', createStart);
+const createMethod = integrationSource.slice(createStart, createEnd);
+if (createStart < 0 || createEnd < 0 || createMethod.includes('ghJSON(') || !integrationSource.includes('private static func pullRequestNumber(from output:')) {
+  throw new Error('GitHub CLI PR creation must use gh pr create output and read back the PR');
+}
 try {
   cp.execFileSync('swiftc', [
     '-O', '-framework', 'Foundation', '-framework', 'Security', '-o', binary,

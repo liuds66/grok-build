@@ -853,8 +853,17 @@ final class GitHubCLIProvider: GitHubProvider {
         }
         let safeBody = GitHubRedaction.text(body, limit: 12_000)
         let safeTitle = GitHubRedaction.text(title, limit: 240)
-        ghJSON(["pr", "create", "--repo", repository.fullName, "--head", head, "--base", base, "--title", safeTitle, "--body", safeBody, "--json", "number,title,body,headRefName,baseRefName,url,state,isDraft,mergedAt"]) { (result: Result<CLIPullRequest, Error>) in
-            completion(result.map { $0.model })
+        gh(["pr", "create", "--repo", repository.fullName, "--head", head, "--base", base, "--title", safeTitle, "--body", safeBody]) { [weak self] result in
+            guard let self else { return }
+            guard result.code == 0 else {
+                completion(.failure(GitHubError.commandFailed(result.output)))
+                return
+            }
+            guard let number = Self.pullRequestNumber(from: result.output, repository: repository) else {
+                completion(.failure(GitHubError.commandFailed("gh pr create 未返回可识别的 PR URL")))
+                return
+            }
+            self.getPullRequest(repository: repository, number: number, completion: completion)
         }
     }
 
@@ -978,6 +987,17 @@ final class GitHubCLIProvider: GitHubProvider {
         if value.contains("cancel") { return .cancelled }
         if value.contains("skip") { return .skipped }
         return .unknown
+    }
+
+    private static func pullRequestNumber(from output: String, repository: GitHubRepositoryBinding) -> Int? {
+        let escapedOwner = NSRegularExpression.escapedPattern(for: repository.owner)
+        let escapedRepo = NSRegularExpression.escapedPattern(for: repository.repo)
+        let pattern = "https://github\\.com/\(escapedOwner)/\(escapedRepo)/pull/([0-9]+)"
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(output.startIndex..<output.endIndex, in: output)
+        guard let match = expression.firstMatch(in: output, range: range), match.numberOfRanges > 1,
+              let numberRange = Range(match.range(at: 1), in: output) else { return nil }
+        return Int(output[numberRange])
     }
 
     private struct CLIRepository: Decodable {
