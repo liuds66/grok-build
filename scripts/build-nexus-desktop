@@ -41,6 +41,7 @@ mkdir -p "${swift_working_dir}"
     -framework Foundation \
     -framework LocalAuthentication \
     -framework Security \
+    -framework WebKit \
     -target x86_64-apple-macos12.0 \
     -o "${macos_dir}/Nexus" \
     "${source_dir}"/*.swift

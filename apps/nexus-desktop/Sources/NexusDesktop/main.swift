@@ -3066,9 +3066,12 @@ final class WorkspacePanelView: LayerView {
     private let outputView = NSTextView()
     private let commandField = NSTextField()
     private let actionButton = NSButton(title: "刷新", target: nil, action: nil)
+    private let browserButton = NSButton(title: "浏览器验证", target: nil, action: nil)
+    private let screenshotButton = NSButton(title: "查看截图", target: nil, action: nil)
     private let summaryLabel = label("", size: 11, color: Palette.secondaryText)
     private let intelligence = ProjectIntelligenceService.shared
     private var runningProcess: Process?
+    private var screenshotWindow: NSWindow?
     private var latestIntelligence: ProjectIntelligenceOverview?
     private var intelligenceRequestID = UUID()
 
@@ -3115,6 +3118,7 @@ final class WorkspacePanelView: LayerView {
         }
     }
     var onClose: (() -> Void)?
+    var onBrowserVerification: (() -> Void)?
 
     init() {
         super.init(fillColor: Palette.elevated.withAlphaComponent(0.38), cornerRadius: 14, strokeColor: Palette.border.withAlphaComponent(0.72))
@@ -3236,6 +3240,20 @@ final class WorkspacePanelView: LayerView {
         actionButton.target = self
         actionButton.action = #selector(primaryAction)
 
+        browserButton.translatesAutoresizingMaskIntoConstraints = false
+        browserButton.bezelStyle = .rounded
+        browserButton.target = self
+        browserButton.action = #selector(browserVerificationClicked)
+        browserButton.toolTip = "启动本地开发服务器并检查页面截图、Console、Network 与布局"
+        browserButton.isHidden = true
+
+        screenshotButton.translatesAutoresizingMaskIntoConstraints = false
+        screenshotButton.bezelStyle = .rounded
+        screenshotButton.target = self
+        screenshotButton.action = #selector(browserScreenshotClicked)
+        screenshotButton.toolTip = "打开最近一次浏览器验证截图"
+        screenshotButton.isHidden = true
+
         let separator = LayerView(fillColor: Palette.border)
         separator.translatesAutoresizingMaskIntoConstraints = false
 
@@ -3250,6 +3268,8 @@ final class WorkspacePanelView: LayerView {
         addSubview(scroll)
         addSubview(commandField)
         addSubview(actionButton)
+        addSubview(browserButton)
+        addSubview(screenshotButton)
 
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
@@ -3291,9 +3311,17 @@ final class WorkspacePanelView: LayerView {
             scroll.bottomAnchor.constraint(equalTo: commandField.topAnchor, constant: -10),
 
             commandField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            commandField.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor, constant: -8),
+            commandField.trailingAnchor.constraint(equalTo: screenshotButton.leadingAnchor, constant: -8),
             commandField.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
             commandField.heightAnchor.constraint(equalToConstant: 28),
+            screenshotButton.trailingAnchor.constraint(equalTo: browserButton.leadingAnchor, constant: -8),
+            screenshotButton.centerYAnchor.constraint(equalTo: commandField.centerYAnchor),
+            screenshotButton.widthAnchor.constraint(equalToConstant: 70),
+            screenshotButton.heightAnchor.constraint(equalToConstant: 28),
+            browserButton.trailingAnchor.constraint(equalTo: actionButton.leadingAnchor, constant: -8),
+            browserButton.centerYAnchor.constraint(equalTo: commandField.centerYAnchor),
+            browserButton.widthAnchor.constraint(equalToConstant: 88),
+            browserButton.heightAnchor.constraint(equalToConstant: 28),
             actionButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             actionButton.centerYAnchor.constraint(equalTo: commandField.centerYAnchor),
             actionButton.widthAnchor.constraint(equalToConstant: 62),
@@ -3344,15 +3372,17 @@ final class WorkspacePanelView: LayerView {
         let terminal = segmented.selectedSegment == 3
         let extensions = segmented.selectedSegment == 2
         commandField.isHidden = !(terminal || extensions)
+        browserButton.isHidden = !terminal
+        screenshotButton.isHidden = true
         commandField.placeholderString = terminal
-            ? "输入命令后按回车运行"
+            ? "输入命令后按回车运行；或点击浏览器验证"
             : "插件地址，或：mcp add 名称 URL"
         actionButton.title = terminal ? "运行" : (extensions ? "重新索引" : "刷新")
         summaryLabel.stringValue = [
             "查看当前 Git 工作区的文件改动",
             "浏览当前项目文件",
             "查看 MCP、插件与技能状态",
-            "运行命令、测试与构建",
+            "运行命令、测试与浏览器验证",
         ][segmented.selectedSegment]
     }
 
@@ -3565,8 +3595,60 @@ final class WorkspacePanelView: LayerView {
         构建项目        在当前工作区运行构建命令
         Git 工具        查看、暂存与审查文件更改
         部署工具        连接发布流程与环境配置
+        浏览器验证      启动本地页面，检查截图、Console、Network 与布局
 
-        在底部输入命令，可直接在当前项目目录执行。
+        在底部输入命令，可直接在当前项目目录执行；点击右侧“浏览器验证”开始本地视觉验证。
+        """
+        scrollToTop()
+    }
+
+    func showBrowserVerificationStatus(_ text: String) {
+        guard segmented.selectedSegment == 3 else { return }
+        summaryLabel.stringValue = "浏览器验证"
+        outputView.string = text
+        screenshotButton.isHidden = true
+        scrollToTop()
+    }
+
+    func showBrowserVerificationResult(_ result: BrowserVerificationResult) {
+        guard segmented.selectedSegment == 3 else { return }
+        let status: String
+        switch result.status {
+        case .passed: status = "● 已通过"
+        case .skipped: status = "○ 已跳过"
+        case .cancelled: status = "○ 已取消"
+        default: status = "× 未通过"
+        }
+        let screenshot = result.screenshots.first?.path ?? "无截图"
+        screenshotButton.isHidden = screenshot == "无截图"
+        let layout = result.layoutFindings.isEmpty ? "0 个问题" : "\(result.layoutFindings.count) 个问题"
+        outputView.string = """
+        浏览器验证
+
+        \(status)
+
+        页面
+        \(result.devServerURL ?? "未启动")
+
+        运行环境
+        \(result.browserRuntime)
+
+        视口
+        \(result.viewport.width) × \(result.viewport.height)
+
+        Console
+        \(result.consoleMessages.count) errors · \(result.consoleWarnings.count) warnings
+
+        Network
+        \(result.failedRequests.count) failed
+
+        Layout
+        \(layout)
+
+        截图
+        \(screenshot)
+
+        \(result.summary)
         """
         scrollToTop()
     }
@@ -3726,6 +3808,29 @@ final class WorkspacePanelView: LayerView {
         } else {
             refresh()
         }
+    }
+
+    @objc private func browserVerificationClicked() {
+        onBrowserVerification?()
+    }
+
+    @objc private func browserScreenshotClicked() {
+        let path = outputView.string
+            .split(separator: "\n")
+            .first(where: { $0.hasPrefix("/") })
+            .map(String.init)
+        guard let path, let image = NSImage(contentsOfFile: path) else { return }
+        let imageView = NSImageView(image: image)
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.imageAlignment = .alignCenter
+        imageView.autoresizingMask = [.width, .height]
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = "浏览器验证截图"
+        window.isReleasedWhenClosed = false
+        window.contentView = imageView
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        screenshotWindow = window
     }
 
     private func manageExtension() {
@@ -4556,6 +4661,7 @@ final class MainViewController: NSViewController {
     private let runner = NexusRunner()
     private let transactionStore = TaskTransactionStore.shared
     private let recovery = CoreRecoveryCoordinator()
+    private let browserVerification = BrowserVerificationService.shared
     private var selectedID: UUID?
     private var streamingText = ""
     private var settingsController: SettingsWindowController?
@@ -4570,6 +4676,8 @@ final class MainViewController: NSViewController {
     private var activeToolFailure: String?
     private var pipeline = AgentPipelineStateMachine()
     private var verificationInFlight = false
+    private var browserVerificationInFlight = false
+    private var browserRepairAttempts = 0
     private var checkpointInFlight = false
 
     override func loadView() {
@@ -4639,6 +4747,9 @@ final class MainViewController: NSViewController {
         bottomBar.onViewCoreLog = { [weak self] in self?.openCoreLog() }
         workspacePanel.onClose = { [weak self] in
             self?.workspacePanel.isHidden = true
+        }
+        workspacePanel.onBrowserVerification = { [weak self] in
+            self?.startBrowserVerificationFromWorkspace()
         }
         topBar.onSettings = { [weak self] in self?.openSettings() }
 
@@ -5012,6 +5123,29 @@ final class MainViewController: NSViewController {
         )
     }
 
+    private func startBrowserVerificationFromWorkspace() {
+        guard !browserVerificationInFlight, let session = selectedSession else { return }
+        browserVerificationInFlight = true
+        workspacePanel.showBrowserVerificationStatus("浏览器验证\n\n正在启动本地开发服务器…")
+        chat.setStatus("● 浏览器验证 · 正在启动", color: Palette.accent)
+        bottomBar.setAgentStatus("浏览器验证", color: Palette.accent)
+        browserVerification.verify(
+            projectPath: session.projectPath,
+            taskID: "manual-\(UUID().uuidString.lowercased())",
+            projectID: nil,
+            viewport: .desktop
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.browserVerificationInFlight = false
+                self.workspacePanel.showBrowserVerificationResult(result)
+                let passed = result.status == .passed
+                self.chat.setStatus(passed ? "浏览器验证通过" : "浏览器验证\(result.status == .skipped ? "已跳过" : "未通过")", color: passed ? Palette.success : Palette.warning)
+                self.bottomBar.setAgentStatus(passed ? "Agent 空闲" : "浏览器需处理", color: passed ? Palette.secondaryText : Palette.warning)
+            }
+        }
+    }
+
     private func send(promptOverride: String? = nil, appendUserMessage: Bool = true) {
         guard !runner.isRunning, activeTransaction == nil, !checkpointInFlight,
               let session = selectedSession else { return }
@@ -5096,6 +5230,7 @@ final class MainViewController: NSViewController {
         )
         streamingText = ""
         pipeline.reset()
+        browserRepairAttempts = 0
         _ = pipeline.start(.architect)
         var transaction = TaskTransaction(
             sessionId: session.id.uuidString.lowercased(),
@@ -5345,9 +5480,8 @@ final class MainViewController: NSViewController {
         bottomBar.setAgentStatus("Agent 运行中", color: Palette.accent)
         VerificationGate.evaluateAsync(projectPath: session.projectPath) { [weak self] report in
             guard let self else { return }
-            self.verificationInFlight = false
             guard self.activeTransaction?.taskId == transaction.taskId,
-                  var latest = self.store.sessions.first(where: { $0.id == session.id }) else { return }
+                  let latest = self.store.sessions.first(where: { $0.id == session.id }) else { return }
             self.updateTransaction { current in
                 current.verification = report.checks
                 current.pipeline = self.pipeline.snapshot
@@ -5361,34 +5495,144 @@ final class MainViewController: NSViewController {
                 self.finishFailure("验证失败：请查看任务验证结果后修复问题。", session: latest, messageID: messageID)
                 self.activeTransaction = nil
                 self.clearActiveTask()
+                self.verificationInFlight = false
                 return
             }
-            _ = self.pipeline.pass(.verifier)
-            if self.pipeline.activeStage == nil { _ = self.pipeline.start(.reviewer) }
-            if self.pipeline.activeStage == .reviewer { _ = self.pipeline.pass(.reviewer) }
-            let pipelinePassed = self.pipeline.canComplete
-            self.updateTransaction { current in
-                current.pipeline = self.pipeline.snapshot
-                current.agentStages.append("Reviewer: review passed")
-                current.transition(to: pipelinePassed ? .completed : .failed)
-            }
-            guard pipelinePassed else {
-                self.finishFailure("Agent 流水线未完成 Verifier/Reviewer 验证。", session: latest, messageID: messageID)
-                self.activeTransaction = nil
-                self.clearActiveTask()
+            let needsBrowser = BrowserVerificationPlanner.shouldRun(
+                projectPath: session.projectPath,
+                prompt: self.activePrompt ?? "",
+                transaction: transaction
+            )
+            if needsBrowser {
+                self.browserVerificationInFlight = true
+                self.chat.setStatus("● 浏览器验证 · 正在启动本地页面", color: Palette.accent)
+                self.bottomBar.setAgentStatus("浏览器验证", color: Palette.accent)
+                self.workspacePanel.showBrowserVerificationStatus("浏览器验证\n\n正在启动本地开发服务器…")
+                self.browserVerification.verify(
+                    projectPath: session.projectPath,
+                    taskID: transaction.taskId,
+                    projectID: nil,
+                    viewport: .desktop
+                ) { [weak self] browserResult in
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        self.browserVerificationInFlight = false
+                        self.workspacePanel.showBrowserVerificationResult(browserResult)
+                        self.updateTransaction { current in
+                            current.verification.append(self.browserVerificationCheck(browserResult))
+                            current.toolCalls.append("Browser Verification evidence: \(browserResult.verificationID)")
+                            current.agentStages.append("Browser Verification: \(browserResult.status.rawValue)")
+                        }
+                        guard self.activeTransaction?.taskId == transaction.taskId,
+                              let latestSession = self.store.sessions.first(where: { $0.id == session.id }) else { return }
+                        if browserResult.hasBlockingFinding {
+                            guard browserResult.status == .failed else {
+                                self.updateTransaction { current in
+                                    current.pipeline = self.pipeline.snapshot
+                                    current.transition(to: .failed)
+                                }
+                                self.finishFailure("浏览器验证未完成：\(browserResult.summary)", session: latestSession, messageID: messageID)
+                                self.activeTransaction = nil
+                                self.clearActiveTask()
+                                self.verificationInFlight = false
+                                return
+                            }
+                            if self.browserRepairAttempts < 3 {
+                                self.browserRepairAttempts += 1
+                                self.verificationInFlight = false
+                                self.pipeline.reset()
+                                _ = self.pipeline.start(.architect)
+                                _ = self.pipeline.pass(.architect)
+                                _ = self.pipeline.start(.builder)
+                                let details = browserResult.findings.prefix(8).map { "- \($0.message): \($0.detail ?? "")" }.joined(separator: "\n")
+                                let repairPrompt = """
+                                Browser Visual Verification 发现页面问题，请在当前项目中修复后重新验证（第 \(self.browserRepairAttempts)/3 轮）：
+                                \(details)
+                                只修复与页面运行、布局、Console 或资源加载相关的问题，完成后运行项目测试。
+                                """
+                                self.activePrompt = repairPrompt
+                                self.updateTransaction { current in
+                                    current.transition(to: .building)
+                                    current.pipeline = self.pipeline.snapshot
+                                    current.agentStages.append("Builder: browser fix loop \(self.browserRepairAttempts)/3")
+                                }
+                                self.chat.setStatus("● Builder · 正在修复浏览器问题", color: Palette.violet)
+                                self.bottomBar.setAgentStatus("Builder 修复", color: Palette.violet)
+                                self.startRunner(
+                                    prompt: repairPrompt,
+                                    session: latestSession,
+                                    approval: self.activeApproval ?? .allowWorkspace,
+                                    messageID: messageID
+                                )
+                                return
+                            }
+                            _ = self.pipeline.fail(.verifier)
+                            self.updateTransaction { current in
+                                current.pipeline = self.pipeline.snapshot
+                                current.transition(to: .failed)
+                            }
+                            self.finishFailure("浏览器视觉验证失败：请查看 Workspace 中的验证证据。", session: latestSession, messageID: messageID)
+                            self.activeTransaction = nil
+                            self.clearActiveTask()
+                            self.verificationInFlight = false
+                            return
+                        }
+                        self.finalizeVerification(session: latestSession, messageID: messageID, report: report)
+                    }
+                }
                 return
             }
-            if let index = latest.messages.firstIndex(where: { $0.id == messageID }), latest.messages[index].content.isEmpty {
-                latest.messages[index].content = report.checks.contains(where: { $0.status == .pass })
-                    ? "任务已完成，验证通过。"
-                    : "任务已完成，验证项均已跳过。"
-            }
-            latest.updatedAt = Date()
-            self.store.update(latest)
-            self.finishRun(status: "已完成", color: Palette.success)
-            self.activeTransaction = nil
-            self.clearActiveTask()
+            self.verificationInFlight = false
+            self.finalizeVerification(session: latest, messageID: messageID, report: report)
         }
+    }
+
+    private func browserVerificationCheck(_ result: BrowserVerificationResult) -> VerificationCheck {
+        let status: VerificationStatus
+        switch result.status {
+        case .passed: status = .pass
+        case .skipped: status = .skipped
+        default: status = .fail
+        }
+        let duration = max(0, result.endedAt.timeIntervalSince(result.startedAt))
+        return VerificationCheck(
+            name: "Browser Visual Verification",
+            command: result.devServerURL,
+            status: status,
+            reason: result.status == .passed ? nil : result.summary,
+            output: "\(result.summary)\n截图：\(result.screenshots.first?.path ?? "无")\nConsole \(result.consoleMessages.count) errors / Network \(result.failedRequests.count) failed / Layout \(result.layoutFindings.count) findings",
+            duration: duration
+        )
+    }
+
+    private func finalizeVerification(session: ChatSession, messageID: UUID, report: VerificationReport) {
+        verificationInFlight = false
+        _ = pipeline.pass(.verifier)
+        if pipeline.activeStage == nil { _ = pipeline.start(.reviewer) }
+        if pipeline.activeStage == .reviewer { _ = pipeline.pass(.reviewer) }
+        let pipelinePassed = pipeline.canComplete
+        updateTransaction { current in
+            current.pipeline = pipeline.snapshot
+            current.agentStages.append("Reviewer: review passed")
+            current.transition(to: pipelinePassed ? .completed : .failed)
+        }
+        guard pipelinePassed else {
+            finishFailure("Agent 流水线未完成 Verifier/Reviewer 验证。", session: session, messageID: messageID)
+            activeTransaction = nil
+            clearActiveTask()
+            return
+        }
+        var latest = session
+        if let index = latest.messages.firstIndex(where: { $0.id == messageID }), latest.messages[index].content.isEmpty {
+            latest.messages[index].content = report.checks.contains(where: { $0.status == .pass })
+                ? "任务已完成，验证通过。"
+                : "任务已完成，验证项均已跳过。"
+        }
+        latest.updatedAt = Date()
+        store.update(latest)
+        finishRun(status: "已完成", color: Palette.success)
+        activeTransaction = nil
+        clearActiveTask()
     }
 
     private func finishFailure(_ message: String, session: ChatSession, messageID: UUID) {

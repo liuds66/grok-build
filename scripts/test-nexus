@@ -61,7 +61,7 @@ check "仓库脚本语法" bash -n \
   "${launcher}" \
   "${repo_root}/scripts/test-nexus"
 check "Git 补丁格式" git -C "${repo_root}" diff --check
-check "桌面端 Swift 类型检查" swiftc -typecheck -framework AppKit -framework Foundation -framework LocalAuthentication -framework Security \
+check "桌面端 Swift 类型检查" swiftc -typecheck -framework AppKit -framework Foundation -framework LocalAuthentication -framework Security -framework WebKit \
   -module-cache-path "${swift_module_cache}" \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop"/*.swift
 check "Project Intelligence Swift 类型检查" swiftc -typecheck -framework Foundation \
@@ -72,6 +72,12 @@ if [[ -x "${project_intelligence_node}" ]]; then
     "${repo_root}/tests/project-intelligence-unit.cjs"
   check "Project Intelligence Acceptance Gate" "${project_intelligence_node}" \
     "${repo_root}/tests/project-intelligence-acceptance.cjs"
+  check "Browser Verification 驱动/安全/布局契约" "${project_intelligence_node}" \
+    "${repo_root}/tests/browser-verification-unit.cjs"
+  check "Browser Verification 本地验收契约" "${project_intelligence_node}" \
+    "${repo_root}/tests/browser-verification-acceptance.cjs"
+  check "Browser Verification localhost 视觉 E2E" "${project_intelligence_node}" \
+    "${repo_root}/tests/browser-verification-live.cjs"
 else
   printf '提示  未找到 Node，跳过 Project Intelligence CJS 回归\n'
 fi
