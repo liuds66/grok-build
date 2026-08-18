@@ -1,0 +1,55 @@
+name: Pull Request Verification
+
+on:
+  push:
+    branches:
+      - v0.5-dev
+  pull_request:
+    branches:
+      - v0.5-dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-verification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministic-verification:
+    name: Deterministic verification
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify host toolchain
+        run: |
+          set -euo pipefail
+          swift --version
+          node --version
+          bash --version
+
+      - name: Run deterministic smoke test
+        env:
+          CI: 'true'
+          NEXUS_SKIP_AGENT: '1'
+        run: |
+          set -euo pipefail
+          node_bin="$(command -v node)"
+          NEXUS_NODE_BIN="$node_bin" NEXUS_SKIP_AGENT=1 CI=true bash scripts/test-nexus
+
+      - name: Run all CJS regression tests
+        run: |
+          set -euo pipefail
+          for test_file in tests/*.cjs; do
+            node "$test_file"
+          done
