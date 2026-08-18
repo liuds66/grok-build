@@ -1370,7 +1370,7 @@ enum RunnerEvent {
     case tool(id: String, title: String, status: String, detail: String?)
     case plan(String)
     case ended(sessionID: String?)
-    case failed(String)
+    case failed(String, cancellationSource: TaskCancellationSource? = nil)
 }
 
 enum TaskApproval: Equatable {
@@ -1392,6 +1392,7 @@ final class CoreSupervisor {
     private var streamedError = ""
     private var reachedEnd = false
     private var stopRequested = false
+    private var stopRequestedSource: TaskCancellationSource?
     private var manualShutdown = false
     private var generation: UInt64 = 0
     private var recoveryWorkItem: DispatchWorkItem?
@@ -1503,6 +1504,7 @@ final class CoreSupervisor {
         stableResetWorkItem = nil
         restartAttempt = 0
         stopRequested = true
+        stopRequestedSource = .appShutdown
         let old = process
         process = nil
         launchInFlight = false
@@ -1601,13 +1603,14 @@ final class CoreSupervisor {
         let taskGeneration = generation
         guard let executable = BackendLocator.wrapperURL else {
             emit(.failed)
-            event(.failed("没有找到 Nexus 编码代理。请重新运行一键安装。"))
+            event(.failed("没有找到 Nexus 编码代理。请重新运行一键安装。", cancellationSource: nil))
             return
         }
 
         let task = Process()
         task.executableURL = executable
         stopRequested = false
+        stopRequestedSource = nil
         emit(.starting, event: event)
         // The read-only profile also disables network access on macOS. That
         // unintentionally prevented the model request itself from reaching
@@ -1717,16 +1720,16 @@ final class CoreSupervisor {
                     if !didEnd {
                         if self.stopRequested {
                             self.emit(.stopped)
-                            event(.failed("任务已停止。"))
+                            event(.failed("任务已停止。", cancellationSource: self.stopRequestedSource ?? .unknown))
                         } else if finished.terminationReason == .uncaughtSignal {
                             // Signal termination is a Core disconnect even if
                             // the child emitted stderr while being killed.
                             // Classify it before ordinary API/tool errors.
                             self.emit(.disconnected, event: event)
                         } else if !errorText.isEmpty {
-                            event(.failed(errorText.isEmpty ? "Nexus 运行失败，请检查设置后重试。" : errorText))
+                            event(.failed(errorText.isEmpty ? "Nexus 运行失败，请检查设置后重试。" : errorText, cancellationSource: nil))
                         } else if finished.terminationStatus != 0 {
-                            event(.failed("Nexus 运行失败，请检查模型设置后重试。"))
+                            event(.failed("Nexus 运行失败，请检查模型设置后重试。", cancellationSource: nil))
                         } else {
                             self.emit(.ready)
                             event(.ended(sessionID: nil))
@@ -1774,15 +1777,16 @@ final class CoreSupervisor {
                     self.process = nil
                     self.lastError = error.localizedDescription
                     self.emit(.failed)
-                    event(.failed("无法启动 Nexus：\(error.localizedDescription)"))
+                    event(.failed("无法启动 Nexus：\(error.localizedDescription)", cancellationSource: nil))
                 }
             }
         }
     }
 
-    func stop() {
+    func stop(source: TaskCancellationSource = .user) {
         guard let task = process else { return }
         stopRequested = true
+        stopRequestedSource = source
         guard task.isRunning else { return }
         task.interrupt()
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
@@ -4678,7 +4682,14 @@ final class MainViewController: NSViewController {
     private var verificationInFlight = false
     private var browserVerificationInFlight = false
     private var browserRepairAttempts = 0
+    /// A task's browser gate is complete only after both desktop and mobile
+    /// viewports have reported.  This flag is reset for every repair loop.
+    private var browserMobileVerificationCompleted = false
     private var checkpointInFlight = false
+    /// Parent task finalization is independent from BrowserVerification's
+    /// short-lived WKWebView/server resources.  This coordinator also makes
+    /// late runtime `end` events and duplicate callbacks idempotent.
+    private var finalization = TaskFinalizationCoordinator(taskID: "idle")
 
     override func loadView() {
         let root = LayerView(fillColor: Palette.canvas)
@@ -4834,13 +4845,29 @@ final class MainViewController: NSViewController {
     }
 
     func stopRunningTask() {
-        runner.stop()
+        stop()
     }
 
     /// App lifecycle entry point. Unlike stopping a user task, this marks the
     /// supervisor as intentionally shut down so Process termination cannot
     /// schedule an automatic restart during Cmd+Q/window close.
     func shutdownCore() {
+        if let transaction = activeTransaction,
+           finalization.requestCancel(source: .appShutdown) {
+            updateTransaction { current in
+                _ = current.transition(to: .cancelled, cancellationSource: .appShutdown)
+                current.agentStages.append("Task cancelled: app_shutdown")
+                current.pipeline = pipeline.snapshot
+            }
+            if let session = store.sessions.first(where: { $0.id.uuidString.lowercased() == transaction.sessionId }),
+               let messageID = activeMessageID {
+                finishFailure("任务已停止（应用退出）。", session: session, messageID: messageID)
+            }
+            browserVerification.cancel()
+            activeTransaction = nil
+            clearActiveTask()
+            verificationInFlight = false
+        }
         runner.shutdown()
     }
 
@@ -5242,6 +5269,7 @@ final class MainViewController: NSViewController {
         transaction.pipeline = pipeline.snapshot
         transactionStore.upsert(transaction)
         activeTransaction = transaction
+        finalization = TaskFinalizationCoordinator(taskID: transaction.taskId)
         activePrompt = prompt
         activeApproval = approval
         activeSessionID = session.id
@@ -5385,9 +5413,17 @@ final class MainViewController: NSViewController {
                 transaction.agentStages.append("Architect: plan updated")
             }
         case .ended(let backendID):
+            // `end` is the only authoritative runtime completion signal.  A
+            // browser/server callback may arrive before or after it, but a
+            // duplicate/late end must never start a second verification run.
+            guard finalization.runtimeEnded() else { return }
+            updateTransaction { transaction in
+                transaction.agentStages.append("Runtime: end received")
+            }
             if let toolFailure = activeToolFailure {
+                _ = finalization.fail(reason: "tool_failure")
                 updateTransaction { transaction in
-                    transaction.transition(to: .failed)
+                    _ = transaction.transition(to: .failed)
                     transaction.agentStages.append("Task stopped after tool failure")
                 }
                 finishFailure(toolFailure, session: session, messageID: messageID)
@@ -5403,11 +5439,19 @@ final class MainViewController: NSViewController {
             session.updatedAt = Date()
             store.update(session)
             beginVerification(session: session, messageID: messageID)
-        case .failed(let message):
+        case .failed(let message, let cancellationSource):
             recovery.reset()
-            let cancelled = message.contains("停止") || message.localizedCaseInsensitiveContains("cancel")
-            updateTransaction { transaction in
-                transaction.transition(to: cancelled ? .cancelled : .failed)
+            if let source = cancellationSource, source != .unknown {
+                guard finalization.requestCancel(source: source) else { return }
+                updateTransaction { transaction in
+                    _ = transaction.transition(to: .cancelled, cancellationSource: source)
+                    transaction.agentStages.append("Task cancelled: \(source.rawValue)")
+                }
+            } else {
+                guard finalization.fail(reason: message) else { return }
+                updateTransaction { transaction in
+                    _ = transaction.transition(to: .failed)
+                }
             }
             finishFailure(message, session: session, messageID: messageID)
             activeTransaction = nil
@@ -5437,8 +5481,9 @@ final class MainViewController: NSViewController {
             bottomBar.setCoreStatus("Core 已断开", color: Palette.error)
             if activeTransaction != nil {
                 chat.setStatus("Core 已断开，任务已中断，正在恢复 Core", color: Palette.warning)
+                _ = finalization.interrupt(source: .coreCrash)
                 updateTransaction { transaction in
-                    transaction.transition(to: .interrupted)
+                    _ = transaction.transition(to: .interrupted, cancellationSource: .coreCrash)
                     transaction.agentStages.append("Core disconnected")
                     transaction.pipeline = pipeline.snapshot
                 }
@@ -5465,7 +5510,11 @@ final class MainViewController: NSViewController {
     }
 
     private func beginVerification(session: ChatSession, messageID: UUID) {
-        guard !verificationInFlight, let transaction = activeTransaction else { return }
+        guard !verificationInFlight,
+              finalization.runtimeEndReceived,
+              !finalization.isTerminal,
+              let transaction = activeTransaction,
+              finalization.taskID == transaction.taskId else { return }
         verificationInFlight = true
         if pipeline.activeStage == .architect { _ = pipeline.pass(.architect) }
         if pipeline.activeStage == nil { _ = pipeline.start(.builder) }
@@ -5504,6 +5553,7 @@ final class MainViewController: NSViewController {
                 transaction: transaction
             )
             if needsBrowser {
+                self.browserMobileVerificationCompleted = false
                 self.browserVerificationInFlight = true
                 self.chat.setStatus("● 浏览器验证 · 正在启动本地页面", color: Palette.accent)
                 self.bottomBar.setAgentStatus("浏览器验证", color: Palette.accent)
@@ -5518,6 +5568,7 @@ final class MainViewController: NSViewController {
                         guard let self else { return }
                         self.browserVerificationInFlight = false
                         self.workspacePanel.showBrowserVerificationResult(browserResult)
+                        self.finalization.browserCleanupCompleted()
                         self.updateTransaction { current in
                             current.verification.append(self.browserVerificationCheck(browserResult))
                             current.toolCalls.append("Browser Verification evidence: \(browserResult.verificationID)")
@@ -5527,6 +5578,7 @@ final class MainViewController: NSViewController {
                               let latestSession = self.store.sessions.first(where: { $0.id == session.id }) else { return }
                         if browserResult.hasBlockingFinding {
                             guard browserResult.status == .failed else {
+                                _ = self.finalization.browserFailed()
                                 self.updateTransaction { current in
                                     current.pipeline = self.pipeline.snapshot
                                     current.transition(to: .failed)
@@ -5567,6 +5619,7 @@ final class MainViewController: NSViewController {
                                 return
                             }
                             _ = self.pipeline.fail(.verifier)
+                            _ = self.finalization.browserFailed()
                             self.updateTransaction { current in
                                 current.pipeline = self.pipeline.snapshot
                                 current.transition(to: .failed)
@@ -5577,17 +5630,79 @@ final class MainViewController: NSViewController {
                             self.verificationInFlight = false
                             return
                         }
+                        if !self.browserMobileVerificationCompleted {
+                            self.startMobileBrowserVerification(
+                                session: latestSession,
+                                messageID: messageID,
+                                report: report,
+                                taskID: transaction.taskId
+                            )
+                            return
+                        }
+                        guard self.finalization.browserPassed() else { return }
                         self.finalizeVerification(session: latestSession, messageID: messageID, report: report)
                     }
                 }
                 return
             }
             self.verificationInFlight = false
+            guard self.finalization.browserPassed() else { return }
             self.finalizeVerification(session: latest, messageID: messageID, report: report)
         }
     }
 
-    private func browserVerificationCheck(_ result: BrowserVerificationResult) -> VerificationCheck {
+    /// Run the mobile viewport after the desktop viewport has passed.  This
+    /// remains part of the same transaction and uses the same finalization
+    /// guard, so a late runtime event or cancellation cannot complete it.
+    private func startMobileBrowserVerification(
+        session: ChatSession,
+        messageID: UUID,
+        report: VerificationReport,
+        taskID: String
+    ) {
+        guard !browserMobileVerificationCompleted,
+              activeTransaction?.taskId == taskID else { return }
+        browserVerificationInFlight = true
+        chat.setStatus("● 浏览器验证 · 移动端正在启动", color: Palette.accent)
+        bottomBar.setAgentStatus("移动端验证", color: Palette.accent)
+        workspacePanel.showBrowserVerificationStatus("浏览器验证（移动端）\n\n正在启动本地开发服务器…")
+        browserVerification.verify(
+            projectPath: session.projectPath,
+            taskID: taskID,
+            projectID: nil,
+            viewport: .mobile
+        ) { [weak self] browserResult in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.browserVerificationInFlight = false
+                self.workspacePanel.showBrowserVerificationResult(browserResult)
+                self.finalization.browserCleanupCompleted()
+                self.updateTransaction { current in
+                    current.verification.append(self.browserVerificationCheck(browserResult, viewport: .mobile))
+                    current.toolCalls.append("Browser Verification 移动端 evidence: \(browserResult.verificationID)")
+                    current.agentStages.append("Browser Verification 移动端: \(browserResult.status.rawValue)")
+                }
+                guard self.activeTransaction?.taskId == taskID,
+                      let latestSession = self.store.sessions.first(where: { $0.id == session.id }) else { return }
+                guard !browserResult.hasBlockingFinding else {
+                    _ = self.finalization.browserFailed()
+                    self.updateTransaction { current in
+                        current.pipeline = self.pipeline.snapshot
+                        current.transition(to: .failed)
+                    }
+                    self.finishFailure("移动端浏览器验证失败：\(browserResult.summary)", session: latestSession, messageID: messageID)
+                    self.activeTransaction = nil
+                    self.clearActiveTask()
+                    return
+                }
+                self.browserMobileVerificationCompleted = true
+                guard self.finalization.browserPassed() else { return }
+                self.finalizeVerification(session: latestSession, messageID: messageID, report: report)
+            }
+        }
+    }
+
+    private func browserVerificationCheck(_ result: BrowserVerificationResult, viewport: BrowserViewport? = nil) -> VerificationCheck {
         let status: VerificationStatus
         switch result.status {
         case .passed: status = .pass
@@ -5596,7 +5711,7 @@ final class MainViewController: NSViewController {
         }
         let duration = max(0, result.endedAt.timeIntervalSince(result.startedAt))
         return VerificationCheck(
-            name: "Browser Visual Verification",
+            name: viewport.map { $0 == .mobile ? "Browser Visual Verification (Mobile)" : "Browser Visual Verification (Desktop)" } ?? "Browser Visual Verification",
             command: result.devServerURL,
             status: status,
             reason: result.status == .passed ? nil : result.summary,
@@ -5607,16 +5722,22 @@ final class MainViewController: NSViewController {
 
     private func finalizeVerification(session: ChatSession, messageID: UUID, report: VerificationReport) {
         verificationInFlight = false
+        guard finalization.runtimeEndReceived,
+              finalization.browserVerificationPassed,
+              !finalization.isTerminal,
+              finalization.startReviewer() else { return }
         _ = pipeline.pass(.verifier)
         if pipeline.activeStage == nil { _ = pipeline.start(.reviewer) }
         if pipeline.activeStage == .reviewer { _ = pipeline.pass(.reviewer) }
         let pipelinePassed = pipeline.canComplete
+        _ = finalization.finishReviewer(passed: pipelinePassed)
         updateTransaction { current in
             current.pipeline = pipeline.snapshot
             current.agentStages.append("Reviewer: review passed")
             current.transition(to: pipelinePassed ? .completed : .failed)
         }
         guard pipelinePassed else {
+            _ = finalization.fail(reason: "reviewer_failed")
             finishFailure("Agent 流水线未完成 Verifier/Reviewer 验证。", session: session, messageID: messageID)
             activeTransaction = nil
             clearActiveTask()
@@ -5761,8 +5882,28 @@ final class MainViewController: NSViewController {
             bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
             return
         }
+        guard activeTransaction != nil,
+              let session = selectedSession,
+              let messageID = activeMessageID else {
+            runner.stop(source: .user)
+            return
+        }
+        // Cancellation is an explicit user action.  Mark the parent task
+        // terminal before stopping the child process so a late runtime `end`
+        // or tool callback cannot resurrect it as completed.
+        guard finalization.requestCancel(source: .user) else { return }
+        updateTransaction { current in
+            _ = current.transition(to: .cancelled, cancellationSource: .user)
+            current.agentStages.append("Task cancelled: user")
+            current.pipeline = pipeline.snapshot
+        }
         chat.setStatus("正在停止", color: Palette.warning)
-        runner.stop()
+        browserVerification.cancel()
+        finishFailure("任务已停止。", session: session, messageID: messageID)
+        activeTransaction = nil
+        clearActiveTask()
+        verificationInFlight = false
+        runner.stop(source: .user)
     }
 
     private func localizedToolTitle(_ title: String, status: String, detail: String? = nil) -> String {

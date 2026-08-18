@@ -11,6 +11,33 @@ enum TaskTransactionState: String, Codable {
     case cancelled
     case interrupted
     case rolledBack = "rolled_back"
+
+    var isTerminal: Bool {
+        switch self {
+        case .completed, .failed, .cancelled, .interrupted, .rolledBack:
+            return true
+        case .created, .planning, .building, .testing, .reviewing:
+            return false
+        }
+    }
+}
+
+/// The only supported reasons for a task cancellation/interruption.  Keeping
+/// this separate from the UI error text prevents a late runtime message (or a
+/// browser/server cleanup message) from being mistaken for user intent.
+enum TaskCancellationSource: String, Codable {
+    case user
+    case appShutdown = "app_shutdown"
+    case coreCrash = "core_crash"
+    case sessionSwitch = "session_switch"
+    case workspaceChange = "workspace_change"
+    case timeout
+    case superseded
+    case browserCleanup = "browser_cleanup"
+    case devServerCleanup = "dev_server_cleanup"
+    case runtimeDisconnect = "runtime_disconnect"
+    case internalError = "internal"
+    case unknown
 }
 
 enum AgentStageName: String, CaseIterable, Codable {
@@ -105,6 +132,9 @@ struct TaskTransaction: Codable, Identifiable {
     var verification: [VerificationCheck]
     var cost: Double?
     var finalState: TaskTransactionState
+    /// Persisted for auditability.  Older transaction files do not have this
+    /// key, so decoding deliberately uses decodeIfPresent below.
+    var cancellationSource: TaskCancellationSource?
     var pipeline: AgentPipelineSnapshot
 
     var id: String { taskId }
@@ -123,14 +153,59 @@ struct TaskTransaction: Codable, Identifiable {
         self.verification = []
         self.cost = nil
         self.finalState = .created
+        self.cancellationSource = nil
         self.pipeline = AgentPipelineSnapshot()
     }
 
-    mutating func transition(to state: TaskTransactionState) {
+    @discardableResult
+    mutating func transition(
+        to state: TaskTransactionState,
+        cancellationSource: TaskCancellationSource? = nil
+    ) -> Bool {
+        // A terminal result is immutable.  In particular, an authoritative
+        // runtime `end` arriving after user cancel/Core crash must not turn the
+        // transaction back into verification or completed.
+        guard !finalState.isTerminal else { return false }
+        if state == .cancelled {
+            // Cancellation is an explicit intent, never inferred from a
+            // localized error string.  Keep legacy callers safe by recording
+            // unknown rather than silently losing the audit reason.
+            self.cancellationSource = cancellationSource ?? .unknown
+        } else if state == .interrupted {
+            self.cancellationSource = cancellationSource
+        } else if state != .failed {
+            self.cancellationSource = nil
+        }
         finalState = state
-        if [.completed, .failed, .cancelled, .interrupted, .rolledBack].contains(state) {
+        if state.isTerminal {
             finishedAt = Date()
         }
+        return true
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case taskId, sessionId, projectPath, checkpointId, startedAt, finishedAt
+        case agentStages, toolCalls, fileChanges, commands, verification, cost
+        case finalState, cancellationSource, pipeline
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        taskId = try container.decode(String.self, forKey: .taskId)
+        sessionId = try container.decode(String.self, forKey: .sessionId)
+        projectPath = try container.decode(String.self, forKey: .projectPath)
+        checkpointId = try container.decodeIfPresent(String.self, forKey: .checkpointId)
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt)
+        agentStages = try container.decode([String].self, forKey: .agentStages)
+        toolCalls = try container.decode([String].self, forKey: .toolCalls)
+        fileChanges = try container.decode([String].self, forKey: .fileChanges)
+        commands = try container.decode([String].self, forKey: .commands)
+        verification = try container.decode([VerificationCheck].self, forKey: .verification)
+        cost = try container.decodeIfPresent(Double.self, forKey: .cost)
+        finalState = try container.decode(TaskTransactionState.self, forKey: .finalState)
+        cancellationSource = try container.decodeIfPresent(TaskCancellationSource.self, forKey: .cancellationSource)
+        pipeline = try container.decode(AgentPipelineSnapshot.self, forKey: .pipeline)
     }
 
     mutating func appendCommand(_ command: String) {
@@ -147,6 +222,13 @@ final class TaskTransactionStore {
     private let fileURL: URL
     private var transactions: [String: TaskTransaction] = [:]
     private let lock = NSLock()
+    // Runtime text arrives token-by-token.  Persisting the whole audit file
+    // synchronously for every token blocks AppKit's main thread and can make
+    // a healthy task look frozen.  Keep the in-memory transaction exact, but
+    // coalesce non-terminal disk writes; terminal transitions always flush.
+    private var lastPersistedAt = Date.distantPast
+    private let persistInterval: TimeInterval = 0.15
+    private let persistedArrayLimit = 500
 
     init(fileURL: URL? = nil) {
         if let fileURL {
@@ -174,10 +256,30 @@ final class TaskTransactionStore {
     func upsert(_ transaction: TaskTransaction) {
         lock.lock()
         transactions[transaction.taskId] = transaction
-        let values = Array(transactions.values).sorted { $0.startedAt > $1.startedAt }
+        let now = Date()
+        let shouldPersist = transaction.finalState.isTerminal
+            || now.timeIntervalSince(lastPersistedAt) >= persistInterval
+        guard shouldPersist else {
+            lock.unlock()
+            return
+        }
+        lastPersistedAt = now
+        let values = Array(transactions.values)
+            .sorted { $0.startedAt > $1.startedAt }
+            .map { boundedForPersistence($0) }
         let data = try? encoder.encode(values)
         lock.unlock()
         if let data { try? data.write(to: fileURL, options: .atomic) }
+    }
+
+    private func boundedForPersistence(_ transaction: TaskTransaction) -> TaskTransaction {
+        var bounded = transaction
+        bounded.agentStages = Array(transaction.agentStages.suffix(persistedArrayLimit))
+        bounded.toolCalls = Array(transaction.toolCalls.suffix(persistedArrayLimit))
+        bounded.fileChanges = Array(transaction.fileChanges.suffix(persistedArrayLimit))
+        bounded.commands = Array(transaction.commands.suffix(persistedArrayLimit))
+        bounded.verification = Array(transaction.verification.suffix(persistedArrayLimit))
+        return bounded
     }
 
     func transaction(id: String) -> TaskTransaction? {
