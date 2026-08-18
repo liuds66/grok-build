@@ -11,12 +11,13 @@ const output = path.join(outputDir, 'runner');
 const sources = [
   path.join(root, 'apps/nexus-desktop/Sources/NexusDesktop/BrowserVerification.swift'),
   path.join(root, 'apps/nexus-desktop/Sources/NexusDesktop/ProjectIntelligence.swift'),
+  path.join(root, 'apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift'),
   path.join(root, 'apps/nexus-desktop/Sources/NexusDesktop/TaskTransaction.swift'),
   path.join(root, 'apps/nexus-desktop/Sources/NexusDesktop/VerificationGate.swift'),
   path.join(__dirname, 'browser-verification-live-harness.swift'),
 ];
 const compile = spawnSync('swiftc', [
-  '-O', '-framework', 'AppKit', '-framework', 'Foundation', '-framework', 'WebKit',
+  '-O', '-framework', 'AppKit', '-framework', 'Foundation', '-framework', 'Security', '-framework', 'WebKit',
   '-o', output, ...sources,
 ], { encoding: 'utf8', timeout: 180000 });
 if (compile.status !== 0) {

@@ -4,7 +4,8 @@ const path = require('path');
 const root = os.tmpdir();
 const binary = path.join(root, `ai-dev-one-agent-state-${process.pid}`);
 try {
-  cp.execFileSync('swiftc', ['-O', '-framework', 'Foundation', '-o', binary,
+  cp.execFileSync('swiftc', ['-O', '-framework', 'Foundation', '-framework', 'Security', '-o', binary,
+    path.join(__dirname, '..', 'apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift'),
     path.join(__dirname, '..', 'apps/nexus-desktop/Sources/NexusDesktop/TaskTransaction.swift'),
     path.join(__dirname, '..', 'apps/nexus-desktop/Sources/NexusDesktop/VerificationGate.swift'),
     path.join(__dirname, 'agent-state-harness.swift')], {stdio: 'pipe'});

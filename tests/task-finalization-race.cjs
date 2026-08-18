@@ -21,7 +21,8 @@ for (const token of [
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-dev-one-finalization-'));
 const binary = path.join(root, 'task-finalization-race');
 try {
-  cp.execFileSync('swiftc', ['-O', '-framework', 'Foundation', '-o', binary,
+  cp.execFileSync('swiftc', ['-O', '-framework', 'Foundation', '-framework', 'Security', '-o', binary,
+    path.join(__dirname, '..', 'apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift'),
     path.join(__dirname, '..', 'apps/nexus-desktop/Sources/NexusDesktop/TaskTransaction.swift'),
     path.join(__dirname, '..', 'apps/nexus-desktop/Sources/NexusDesktop/TaskFinalization.swift'),
     path.join(__dirname, '..', 'apps/nexus-desktop/Sources/NexusDesktop/VerificationGate.swift'),

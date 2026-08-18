@@ -136,6 +136,9 @@ struct TaskTransaction: Codable, Identifiable {
     /// key, so decoding deliberately uses decodeIfPresent below.
     var cancellationSource: TaskCancellationSource?
     var pipeline: AgentPipelineSnapshot
+    /// Optional GitHub workflow metadata.  Keeping it nullable preserves
+    /// compatibility with local-only transactions and older JSON files.
+    var github: GitHubTaskMetadata?
 
     var id: String { taskId }
 
@@ -155,6 +158,7 @@ struct TaskTransaction: Codable, Identifiable {
         self.finalState = .created
         self.cancellationSource = nil
         self.pipeline = AgentPipelineSnapshot()
+        self.github = nil
     }
 
     @discardableResult
@@ -165,7 +169,18 @@ struct TaskTransaction: Codable, Identifiable {
         // A terminal result is immutable.  In particular, an authoritative
         // runtime `end` arriving after user cancel/Core crash must not turn the
         // transaction back into verification or completed.
-        guard !finalState.isTerminal else { return false }
+        // Rollback is an explicit user action that is allowed to move a
+        // failed/cancelled/interrupted task into the separate rolled_back
+        // terminal state.  All other terminal states remain immutable so a
+        // late runtime event cannot resurrect or rewrite the result.
+        if finalState.isTerminal, state != .rolledBack { return false }
+        if finalState == .rolledBack { return false }
+        if state == .rolledBack {
+            guard finalState == .failed || finalState == .cancelled || finalState == .interrupted else { return false }
+            finalState = .rolledBack
+            finishedAt = Date()
+            return true
+        }
         if state == .cancelled {
             // Cancellation is an explicit intent, never inferred from a
             // localized error string.  Keep legacy callers safe by recording
@@ -186,7 +201,7 @@ struct TaskTransaction: Codable, Identifiable {
     private enum CodingKeys: String, CodingKey {
         case taskId, sessionId, projectPath, checkpointId, startedAt, finishedAt
         case agentStages, toolCalls, fileChanges, commands, verification, cost
-        case finalState, cancellationSource, pipeline
+        case finalState, cancellationSource, pipeline, github
     }
 
     init(from decoder: Decoder) throws {
@@ -206,6 +221,7 @@ struct TaskTransaction: Codable, Identifiable {
         finalState = try container.decode(TaskTransactionState.self, forKey: .finalState)
         cancellationSource = try container.decodeIfPresent(TaskCancellationSource.self, forKey: .cancellationSource)
         pipeline = try container.decode(AgentPipelineSnapshot.self, forKey: .pipeline)
+        github = try container.decodeIfPresent(GitHubTaskMetadata.self, forKey: .github)
     }
 
     mutating func appendCommand(_ command: String) {

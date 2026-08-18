@@ -10,12 +10,13 @@ const output = path.join(os.tmpdir(), `ai-dev-one-browser-contract-${process.pid
 const sources = [
   path.join(root, 'apps/nexus-desktop/Sources/NexusDesktop/BrowserVerification.swift'),
   path.join(root, 'apps/nexus-desktop/Sources/NexusDesktop/ProjectIntelligence.swift'),
+  path.join(root, 'apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift'),
   path.join(root, 'apps/nexus-desktop/Sources/NexusDesktop/TaskTransaction.swift'),
   path.join(root, 'apps/nexus-desktop/Sources/NexusDesktop/VerificationGate.swift'),
   swift,
 ];
 const compile = spawnSync('swiftc', [
-  '-O', '-framework', 'AppKit', '-framework', 'Foundation', '-framework', 'WebKit',
+  '-O', '-framework', 'AppKit', '-framework', 'Foundation', '-framework', 'Security', '-framework', 'WebKit',
   '-o', output, ...sources,
 ], { encoding: 'utf8', timeout: 120000 });
 if (compile.status !== 0) {

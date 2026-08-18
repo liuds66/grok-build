@@ -78,6 +78,8 @@ if [[ -x "${project_intelligence_node}" ]]; then
     "${repo_root}/tests/browser-verification-acceptance.cjs"
   check "Browser Verification localhost 视觉 E2E" "${project_intelligence_node}" \
     "${repo_root}/tests/browser-verification-live.cjs"
+  check "GitHub Autonomous Provider/Worktree/Policy/CI 契约" "${project_intelligence_node}" \
+    "${repo_root}/tests/github-autonomous-unit.cjs"
 else
   printf '提示  未找到 Node，跳过 Project Intelligence CJS 回归\n'
 fi
@@ -137,6 +139,26 @@ check "Project Intelligence 敏感元数据复用" grep -q 'Sensitive files are 
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/ProjectIntelligence.swift"
 check "Project Intelligence 知识脱敏" grep -q 'projectIntelligenceSanitizeKnowledge' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/ProjectIntelligence.swift"
+check "GitHubProvider 抽象" grep -q 'protocol GitHubProvider' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
+check "GitHub Keychain 凭据" grep -q 'GitHubCredentialStore' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
+check "GitHub Finder-safe gh 路径" grep -q 'GitHubExecutableResolver' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
+check "GitHub 仓库绑定" grep -q 'GitHubRepositoryBindingResolver' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
+check "GitHub 隔离 worktree" grep -q 'GitHubWorktreeManager' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
+check "GitHub 远程策略" grep -q 'enum GitHubRemotePolicy' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
+check "GitHub 外部内容边界" grep -q 'UNTRUSTED_EXTERNAL_CONTENT' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
+check "GitHub CI 分类" grep -q 'enum CIFailureClassifier' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
+check "GitHub 修复轮数上限" grep -q 'maximumRounds' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
+check "GitHub 禁止自动合并" grep -q 'mergePullRequest' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
 check "知识库项目智能 UI" grep -q 'renderProjectIntelligence' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
 check "Agent 项目上下文桥接" grep -q 'promptContext' \

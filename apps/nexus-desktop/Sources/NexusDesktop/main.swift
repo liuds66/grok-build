@@ -3074,6 +3074,7 @@ final class WorkspacePanelView: LayerView {
     private let screenshotButton = NSButton(title: "查看截图", target: nil, action: nil)
     private let summaryLabel = label("", size: 11, color: Palette.secondaryText)
     private let intelligence = ProjectIntelligenceService.shared
+    private let githubProvider = GitHubCLIProvider()
     private var runningProcess: Process?
     private var screenshotWindow: NSWindow?
     private var latestIntelligence: ProjectIntelligenceOverview?
@@ -3601,8 +3602,24 @@ final class WorkspacePanelView: LayerView {
         部署工具        连接发布流程与环境配置
         浏览器验证      启动本地页面，检查截图、Console、Network 与布局
 
+        GitHub 自主工程
+        连接状态        正在读取…
+        Autonomous Mode 默认关闭
+        远程策略        读取允许；Push / PR 需授权；合并、强推、删分支永久拒绝
+
         在底部输入命令，可直接在当前项目目录执行；点击右侧“浏览器验证”开始本地视觉验证。
         """
+        githubProvider.authenticate { [weak self] result in
+            guard let self, self.segmented.selectedSegment == 3 else { return }
+            let status: String
+            switch result {
+            case .success(.githubReady): status = "● 已授权"
+            case .success(.githubUnauthorized), .success(.githubNotConfigured): status = "○ 未授权"
+            case .success(.githubAuthenticating): status = "○ 授权中"
+            case .success(.githubError), .failure: status = "× 不可用"
+            }
+            self.outputView.string = self.outputView.string.replacingOccurrences(of: "连接状态        正在读取…", with: "连接状态        \(status)")
+        }
         scrollToTop()
     }
 
