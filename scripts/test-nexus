@@ -206,7 +206,9 @@ check "Composer 120px" grep -q 'heightAnchor.constraint(equalToConstant: 120)' \
 check "Workspace 禁止横向滚动" grep -q 'scroll.hasHorizontalScroller = false' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
 
-if [[ -x "${agent_bin}" ]]; then
+if [[ "${CI:-}" == "true" && "${NEXUS_SKIP_AGENT:-0}" == "1" ]]; then
+  printf '提示  CI deterministic mode：未构建本机编码代理，跳过代理/CLI/设置运行时检查\n'
+elif [[ -x "${agent_bin}" ]]; then
   pass "编码代理存在"
   nexus_env=(env NEXUS_HOME="${home_dir}/.nexus" GROK_HOME="${home_dir}/.nexus")
   check "代理版本" "${nexus_env[@]}" "${agent_bin}" --version
