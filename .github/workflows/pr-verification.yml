@@ -1,6 +1,9 @@
 name: Pull Request Verification
 
 on:
+  push:
+    branches:
+      - v0.5-dev
   pull_request:
     branches:
       - v0.5-dev
