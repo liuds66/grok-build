@@ -9,7 +9,7 @@
 | 项目 | 结果 |
 | --- | --- |
 | Repository | `liuds66/grok-build` |
-| Local repository | `/Users/mac/Documents/grok Build底座`（物理路径：`/Volumes/AI-DEV/Nexus项目/源代码/grok Build底座`） |
+| Local repository | 当前 checkout（本机绝对路径不写入仓库） |
 | Branch | `v0.5-dev` |
 | Starting baseline | `e2cbdc3250a783f78b3d66aa0e49b9bcce88b707` |
 | `origin/v0.5-dev` | `e2cbdc3250a783f78b3d66aa0e49b9bcce88b707`（normal push，非 force） |
@@ -17,11 +17,11 @@
 | Main workspace | Final Gate 前后 clean，`Main Workspace Unchanged = YES` |
 | App source | `apps/nexus-desktop/Sources/NexusDesktop` |
 | Rust workspace | repository root `Cargo.toml` / `crates/` |
-| Installed App | `/Volumes/AI-DEV/Nexus项目/应用/Nexus.app` |
+| Installed App | `Nexus.app`（本机安装路径不写入仓库） |
 | Bundle | display name `AI Dev One`；bundle id `cn.nexus.desktop`；已签名验证 |
-| Installed build version | `0.4.0-beta.1`（历史兼容版本；本轮没有引入第二套 v0.5 版本机制，也没有创建 tag） |
+| Installed build version | `0.5.0-beta.1`（本轮 release metadata candidate；Bundle ID、Keychain service、Application Support 和 `Nexus.app` 文件名保持兼容） |
 
-> v0.5 Phase 1/2/3 的既有发布记录明确保留 `0.4.0-beta.1` bundle 字符串以保护旧配置、Keychain 与 Bundle ID。正式 v0.5 安装包版本号应在发布打包步骤按既有版本机制更新；这不是本次工作流 Gate 的 P0/P1 缺陷。
+> v0.5 Phase 1/2/3 的历史报告保留旧版本字符串作为兼容记录；本候选已在唯一权威 `Info.plist` 元数据中更新为 `0.5.0-beta.1`，没有引入第二套版本系统。
 
 ## Real Issue / Task
 
@@ -31,10 +31,10 @@
 | Issue trust boundary | `UNTRUSTED_EXTERNAL_CONTENT`；正文只作为需求输入，未改变 Policy、Secret Boundary、Git Boundary、Workspace Boundary 或系统指令 |
 | Task ID | `2e3f6bea-b8b0-4167-ab64-f141d9667e6a` |
 | Session | `final-integration-issue-1` |
-| Worktree | `/Users/mac/Library/Application Support/AI Dev One/worktrees/grok-build/task-issue-1` |
+| Worktree | PR task worktree（本机绝对路径不写入仓库） |
 | Task branch | `ai-dev-one/issue-1-github-remote-roles` |
 | Base SHA | `e2cbdc3250a783f78b3d66aa0e49b9bcce88b707` |
-| Checkpoint | `32d40a8c-3a59-47f6-994d-f1029159ffdc`；真实 Git-backed snapshot 已落盘 |
+| Checkpoint | `32d40a8c-3a59-47f6-994d-f1029159ffdc`；真实 Git-backed snapshot 已落盘（本机存储路径不写入仓库） |
 
 ## Pipeline Gate
 
@@ -42,7 +42,7 @@
 | --- | --- | --- |
 | Project Intelligence | PASS | bounded context、相关文件/符号/测试由 Project Intelligence acceptance/unit 套件验证；未进行 blind 全仓库扫描 |
 | Architect | PASS | Transaction pipeline 记录 `Architect → passed`；先于 Builder 执行 |
-| Checkpoint | PASS | `CheckpointManager` 真实磁盘快照，路径 `/Users/mac/Library/Application Support/Nexus/checkpoints/32d40a8c-3a59-47f6-994d-f1029159ffdc/snapshot` |
+| Checkpoint | PASS | `CheckpointManager` 真实磁盘快照；本机存储路径不写入仓库 |
 | Builder | PASS | 仅在隔离 worktree 修改；最终实现 commit `91b93896d7469ed9aa53ed03b63ec5e3f476e69c` |
 | Incremental intelligence | PASS | Project Intelligence incremental/index/context 回归通过 |
 | Local Verification | PASS | `scripts/test-nexus` clean run：`74 passed, 0 failed` |
@@ -84,25 +84,26 @@ coreStateFinal=ready
 | 项目 | 结果 |
 | --- | --- |
 | Task implementation commit | `91b93896d7469ed9aa53ed03b63ec5e3f476e69c`（包含 RC2/RC3 已验证实现与 Issue #1 实现） |
-| Product implementation PR head | `91b93896d7469ed9aa53ed03b63ec5e3f476e69c`（后续仅有 Gate 报告文档提交） |
+| Product implementation PR head | `91b93896d7469ed9aa53ed03b63ec5e3f476e69c`（后续为 Gate 报告与 release metadata 提交） |
+| Release metadata commit | `bd3b7c1674163a4a2fb9716f8073d41f731b60b0`（`0.5.0-beta.1`） |
 | Push | `PASS`；normal push 到 `origin`，无 `--force` / `--force-with-lease` |
 | PR | [#2 feat: clarify GitHub remote roles in tools panel](https://github.com/liuds66/grok-build/pull/2) |
 | PR state | `OPEN`，`MERGEABLE`，`mergeStateStatus=CLEAN` |
 | Implementation CI run | [32391787146](https://github.com/liuds66/grok-build/actions/runs/32391787146)，attempt 1 |
-| Final PR-head CI run | [32397494344](https://github.com/liuds66/grok-build/actions/runs/32397494344)，attempt 1 |
-| CI result | `PASS`；两次 Pull Request Verification / Deterministic verification 均 success |
+| Final PR-head CI run | [32406138688](https://github.com/liuds66/grok-build/actions/runs/32406138688)，attempt 1；head `bd3b7c1674163a4a2fb9716f8073d41f731b60b0` |
+| CI result | `PASS`；最新 Pull Request Verification / Deterministic verification success（`5m45s`） |
 | Human merge | required；未自动合并、未关闭 PR、未删除分支 |
 
 没有创建第二个 Issue、Task branch 或 PR；报告文档提交只触发了同一 PR 的一次最终 CI 重跑。现有 PR 保持 OPEN，供用户人工决定是否合并。
 
 ## App Restart / CI Recovery
 
-真实 App `/Volumes/AI-DEV/Nexus项目/应用/Nexus.app` 的恢复链路使用同一个 task/session/worktree/checkpoint/PR/run：
+真实安装 `Nexus.app` 的恢复链路使用同一个 task/session/worktree/checkpoint/PR/run：
 
 - App 在 CI `32391787146` 仍为 `in_progress` 时退出；退出后无 App/Core/agent 残留。
 - CI 在 App 停止期间完成 `success`。
 - 冷启动后恢复同一 Transaction：`finalState=completed`、`workflowState=ready_for_human_merge`、`ciFinalState=passed`、PR `#2`、run `32391787146`；没有重新创建任务、worktree、分支或 PR。
-- 最终安装包重新从 task worktree 构建、签名、安装并启动/退出 smoke：PID `24836`，codesign `PASS`，退出后 Core/agent 均为 `0`。
+- 最终安装包重新从 task worktree 构建、签名、安装并启动/退出 smoke：codesign `PASS`，退出后 Core/agent 均为 `0`；release metadata candidate 直接读取 Bundle 版本为 `0.5.0-beta.1`。
 
 结果：`App restart during CI = PASS`、`CI Recovery = PASS`、`Duplicate poller = 0`。
 
@@ -126,8 +127,7 @@ coreStateFinal=ready
 Clean final regression command：
 
 ```text
-NEXUS_NODE_BIN="/Users/mac/Library/Application Support/AI Dev One Installer/toolchains/node/bin/node" \
-CI=true NEXUS_SKIP_AGENT=1 bash scripts/test-nexus
+NEXUS_NODE_BIN="<bundled-node>" CI=true NEXUS_SKIP_AGENT=1 bash scripts/test-nexus
 ```
 
 结果：`74 passed, 0 failed`。
@@ -141,7 +141,7 @@ CI=true NEXUS_SKIP_AGENT=1 bash scripts/test-nexus
 - verification gate：`unknown=SKIPPED node-plan=PASS`
 - browser verification driver/security/layout/local-live：PASS（native AppKit UI 依法跳过 desktop/mobile DOM 验证）
 - Swift desktop typecheck：PASS
-- desktop build：PASS，task worktree 重新构建 `/Users/mac/Library/Application Support/AI Dev One/worktrees/grok-build/task-issue-1/dist/Nexus.app`
+- desktop build：PASS，task worktree 重新构建 `Nexus.app`
 - codesign：`codesign --verify --deep --strict` PASS
 - installed App launch/quit：PASS
 
@@ -168,6 +168,6 @@ P3 = 0
 
 `Issue → Project Intelligence → Architect → isolated worktree → Checkpoint → Builder → Local Verification → Core Crash/Recovery → Verifier → Reviewer → Commit → Push → PR → real GitHub CI → App restart recovery → READY_FOR_HUMAN_MERGE`：`PASS`。
 
-实现基线 / Product implementation commit：`91b93896d7469ed9aa53ed03b63ec5e3f476e69c`；其后仅追加本报告文档提交，未再改变产品代码。本报告是集成 Gate 记录，不创建 `v0.5.0-beta.1` tag，不执行 merge，不向 upstream 写入。
+实现基线 / Product implementation commit：`91b93896d7469ed9aa53ed03b63ec5e3f476e69c`；release metadata commit：`bd3b7c1674163a4a2fb9716f8073d41f731b60b0`。其后仅追加本报告文档提交，未再改变产品代码。本报告是集成 Gate 记录，不创建 `v0.5.0-beta.1` tag，不执行 merge，不向 upstream 写入。
 
-建议：允许进入 `v0.5.0-beta.1 FINAL BASELINE FREEZE` 流程；发布打包时再按既有版本机制把用户可见 bundle 版本更新为目标 v0.5 版本，并由用户人工合并 PR #2。
+建议：允许进入 `v0.5.0-beta.1 FINAL BASELINE FREEZE` 流程；候选 Bundle 已为目标 v0.5 版本，当前仅等待用户人工合并 PR #2。
