@@ -166,6 +166,12 @@ struct TaskTransaction: Codable, Identifiable {
         to state: TaskTransactionState,
         cancellationSource: TaskCancellationSource? = nil
     ) -> Bool {
+        // Local Agent completion is not the terminal result of a GitHub task
+        // that is still waiting for remote verification.
+        if state == .completed,
+           github?.workflowState == .waitingCI || github?.workflowState == .ciFailed {
+            return false
+        }
         // A terminal result is immutable.  In particular, an authoritative
         // runtime `end` arriving after user cancel/Core crash must not turn the
         // transaction back into verification or completed.
@@ -269,11 +275,12 @@ final class TaskTransactionStore {
         transactions = Dictionary(uniqueKeysWithValues: values.map { ($0.taskId, $0) })
     }
 
-    func upsert(_ transaction: TaskTransaction) {
+    func upsert(_ transaction: TaskTransaction, forcePersist: Bool = false) {
         lock.lock()
         transactions[transaction.taskId] = transaction
         let now = Date()
-        let shouldPersist = transaction.finalState.isTerminal
+        let shouldPersist = forcePersist
+            || transaction.finalState.isTerminal
             || now.timeIntervalSince(lastPersistedAt) >= persistInterval
         guard shouldPersist else {
             lock.unlock()
@@ -302,6 +309,29 @@ final class TaskTransactionStore {
         lock.lock()
         defer { lock.unlock() }
         return transactions[id]
+    }
+
+    /// Returns an immutable snapshot for cold-start recovery. Callers never
+    /// receive the store's internal dictionary, so GitHub lifecycle recovery
+    /// can enumerate non-terminal work without creating a second database.
+    func allTransactions() -> [TaskTransaction] {
+        lock.lock()
+        defer { lock.unlock() }
+        return transactions.values.sorted { $0.startedAt > $1.startedAt }
+    }
+
+    /// Test/live-acceptance cleanup is deliberately task-id scoped. It never
+    /// clears the user's transaction database or unrelated session history.
+    func remove(taskID: String) {
+        lock.lock()
+        transactions.removeValue(forKey: taskID)
+        lastPersistedAt = Date()
+        let values = Array(transactions.values)
+            .sorted { $0.startedAt > $1.startedAt }
+            .map { boundedForPersistence($0) }
+        let data = try? encoder.encode(values)
+        lock.unlock()
+        if let data { try? data.write(to: fileURL, options: .atomic) }
     }
 
     private var encoder: JSONEncoder {
