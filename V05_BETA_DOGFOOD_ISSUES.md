@@ -34,3 +34,16 @@
 3. 不为了 Dogfood 制造垃圾 Issue、PR、Push 或自动合并。
 4. 只有重复任务后出现持续单调增长，才登记内存、文件描述符、Transaction 或索引持久化泄漏。
 5. 关闭问题前必须填写 Fix Commit、Regression、Live Retest 和 Status。
+
+## Dogfood Run History
+
+### 2026-08-21 · 初始安装包 Idle Soak
+
+| 检查 | 结果 | 证据 |
+| --- | --- | --- |
+| 安装包启动/退出（3 次） | PASS | 每次均正常启动并退出；无 Nexus、nexus-agent 或 ai-dev-one-core 残留进程 |
+| 30 秒空闲运行 | PASS | RSS 在约 0.7–81 MB 间短暂波动后回落并稳定；未发现子进程泄漏 |
+| 冻结 Tag 完整性 | PASS | `v0.5.0-beta.1` 仍指向 `ea576b370636bc81758bfaf591b29355d817d0bf` |
+| Secret redaction | PASS | 现有脱敏回归扫描通过；未发现凭据形态值 |
+
+本轮未发现已确认的 P0/P1/P2/P3 缺陷。上述检查是本地基线观察，不替代后续真实项目、多任务和网络故障场景；发现问题时按本文规定的闭环处理。
