@@ -164,23 +164,47 @@ enum WorkMonitorRedaction {
 // MARK: - Work Monitor Window
 
 final class WorkMonitorWindowController: NSWindowController {
+    private static let frameAutosaveName = NSWindow.FrameAutosaveName("AI Dev One.WorkMonitor")
+    private static let alwaysOnTopKey = "ai-dev-one.work-monitor.always-on-top"
     private let monitorView: WorkMonitorView
-    private var didCenter = false
+    private var didRestoreFrame = false
+    private var isPinned: Bool
 
     init() {
         monitorView = WorkMonitorView()
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 860),
-            styleMask: [.titled, .closable, .resizable],
+        isPinned = UserDefaults.standard.bool(forKey: Self.alwaysOnTopKey)
+        let window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 620),
+            styleMask: [.titled, .closable, .resizable, .utilityWindow],
             backing: .buffered,
             defer: false
         )
         window.title = "AI Dev One · 工作监控"
         window.titleVisibility = .visible
-        window.minSize = NSSize(width: 640, height: 700)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.minSize = NSSize(width: 420, height: 420)
+        window.contentMinSize = NSSize(width: 420, height: 420)
         window.isReleasedWhenClosed = false
+        window.hidesOnDeactivate = false
+        window.becomesKeyOnlyIfNeeded = false
+        window.isMovableByWindowBackground = true
+        window.level = isPinned ? .floating : .normal
+        // Do not join all Spaces by default. A pinned monitor is still a normal
+        // macOS floating level, never a system/status-bar level.
+        window.collectionBehavior = [.managed]
+        window.setFrameAutosaveName(Self.frameAutosaveName)
+        // 作为 NSPanel 的根 contentView 使用 autoresizing，避免把窗口根视图
+        // 留在无父级约束的 translatesAutoresizingMaskIntoConstraints=false 状态。
+        monitorView.translatesAutoresizingMaskIntoConstraints = true
+        monitorView.autoresizingMask = [.width, .height]
         window.contentView = monitorView
         super.init(window: window)
+        monitorView.onPinToggle = { [weak self] pinned in
+            self?.setPinned(pinned)
+        }
+        monitorView.setPinned(isPinned)
     }
 
     required init?(coder: NSCoder) {
@@ -189,10 +213,7 @@ final class WorkMonitorWindowController: NSWindowController {
 
     func show(summary: WorkActivitySummary) {
         monitorView.update(summary: summary)
-        if !didCenter {
-            window?.center()
-            didCenter = true
-        }
+        restoreFrameIfNeeded()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -201,6 +222,52 @@ final class WorkMonitorWindowController: NSWindowController {
     func update(summary: WorkActivitySummary) {
         monitorView.update(summary: summary)
     }
+
+    private func setPinned(_ pinned: Bool) {
+        isPinned = pinned
+        UserDefaults.standard.set(pinned, forKey: Self.alwaysOnTopKey)
+        window?.level = pinned ? .floating : .normal
+        monitorView.setPinned(pinned)
+        if pinned {
+            window?.orderFrontRegardless()
+        }
+    }
+
+    private func restoreFrameIfNeeded() {
+        guard let window else { return }
+        if didRestoreFrame {
+            if !frameIsVisible(window.frame) {
+                window.setFrame(defaultFrame(for: window.frame.size), display: false)
+            }
+            return
+        }
+        didRestoreFrame = true
+        let restored = window.setFrameUsingName(Self.frameAutosaveName)
+        guard restored, frameIsVisible(window.frame) else {
+            window.setFrame(defaultFrame(for: window.frame.size), display: false)
+            return
+        }
+    }
+
+    private func defaultFrame(for size: NSSize) -> NSRect {
+        let preferredSize = NSSize(
+            width: max(420, min(size.width, 480)),
+            height: max(420, min(size.height, 620))
+        )
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let margin: CGFloat = 24
+        return NSRect(
+            x: max(visible.minX + margin, visible.maxX - preferredSize.width - margin),
+            y: max(visible.minY + margin, visible.maxY - preferredSize.height - margin),
+            width: preferredSize.width,
+            height: preferredSize.height
+        )
+    }
+
+    private func frameIsVisible(_ frame: NSRect) -> Bool {
+        NSScreen.screens.contains { $0.visibleFrame.contains(frame) }
+    }
 }
 
 final class WorkMonitorView: LayerView {
@@ -208,9 +275,11 @@ final class WorkMonitorView: LayerView {
     private let documentView = LayerView(fillColor: .clear)
     private let bodyStack = NSStackView()
     private let headerStatus = label("● Agent 空闲", size: 11, weight: .medium, color: Palette.secondaryText)
+    private let pinButton = NSButton(title: "置顶", target: nil, action: nil)
     private var elapsedLabel: NSTextField?
     private var currentSummary = WorkActivitySummary.idle
     private var timer: Timer?
+    var onPinToggle: ((Bool) -> Void)?
 
     override init(fillColor: NSColor = Palette.canvas, cornerRadius: CGFloat = 0, strokeColor: NSColor? = nil) {
         super.init(fillColor: fillColor, cornerRadius: cornerRadius, strokeColor: strokeColor)
@@ -260,15 +329,28 @@ final class WorkMonitorView: LayerView {
         headerStatus.wantsLayer = true
         headerStatus.layer?.cornerRadius = 11
         headerStatus.layer?.borderWidth = 1
+        pinButton.translatesAutoresizingMaskIntoConstraints = false
+        pinButton.setButtonType(.toggle)
+        pinButton.bezelStyle = .texturedRounded
+        pinButton.image = NSImage(systemSymbolName: "pin", accessibilityDescription: "始终置顶")
+        pinButton.imagePosition = .imageLeading
+        pinButton.toolTip = "始终置顶"
+        pinButton.target = self
+        pinButton.action = #selector(pinClicked)
+        pinButton.setContentHuggingPriority(.required, for: .horizontal)
         header.addSubview(title)
         header.addSubview(subtitle)
         header.addSubview(headerStatus)
+        header.addSubview(pinButton)
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 20),
             title.topAnchor.constraint(equalTo: header.topAnchor, constant: 13),
             subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 3),
-            headerStatus.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -20),
+            pinButton.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -16),
+            pinButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            pinButton.heightAnchor.constraint(equalToConstant: 24),
+            headerStatus.trailingAnchor.constraint(equalTo: pinButton.leadingAnchor, constant: -8),
             headerStatus.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             headerStatus.heightAnchor.constraint(equalToConstant: 24),
             headerStatus.widthAnchor.constraint(greaterThanOrEqualToConstant: 100),
@@ -318,7 +400,7 @@ final class WorkMonitorView: LayerView {
             bodyStack.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
-        headerStatus.stringValue = "●  (currentSummary.status)"
+        headerStatus.stringValue = "●  \(currentSummary.status)"
         headerStatus.textColor = statusColor(currentSummary.status)
         headerStatus.layer?.borderColor = statusColor(currentSummary.status).withAlphaComponent(0.35).cgColor
         headerStatus.layer?.backgroundColor = statusColor(currentSummary.status).withAlphaComponent(0.10).cgColor
@@ -342,7 +424,7 @@ final class WorkMonitorView: LayerView {
 
     private func makeTaskCard() -> NSView {
         let task = wrappingLabel(currentSummary.taskTitle.isEmpty ? "未命名任务" : currentSummary.taskTitle, size: 18, weight: .semibold, color: NSColor(calibratedWhite: 0.96, alpha: 1), lines: 2)
-        let project = label("项目  (currentSummary.projectName)", size: 11, color: Palette.secondaryText)
+        let project = label("项目  \(currentSummary.projectName)", size: 11, color: Palette.secondaryText)
         project.toolTip = currentSummary.projectPath
         let elapsed = label("耗时  —", size: 11, color: Palette.secondaryText)
         elapsedLabel = elapsed
@@ -465,7 +547,7 @@ final class WorkMonitorView: LayerView {
             return row
         }
         if currentSummary.files.count > visible.count {
-            rows.append(label("+ (currentSummary.files.count - visible.count) 个文件", size: 10.5, color: Palette.secondaryText))
+            rows.append(label("+ \(currentSummary.files.count - visible.count) 个文件", size: 10.5, color: Palette.secondaryText))
         }
         return sectionCard("涉及文件", verticalStack(rows, spacing: 7), accent: Palette.violet)
     }
@@ -621,4 +703,15 @@ final class WorkMonitorView: LayerView {
     }
 
     private func runtimeColor(_ value: String) -> NSColor { statusColor(value) }
+
+    func setPinned(_ pinned: Bool) {
+        pinButton.state = pinned ? .on : .off
+        pinButton.title = pinned ? "已置顶" : "置顶"
+        pinButton.contentTintColor = pinned ? Palette.accent : Palette.secondaryText
+        pinButton.toolTip = pinned ? "取消始终置顶" : "始终置顶"
+    }
+
+    @objc private func pinClicked() {
+        onPinToggle?(pinButton.state == .on)
+    }
 }

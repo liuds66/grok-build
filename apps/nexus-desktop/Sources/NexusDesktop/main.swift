@@ -5089,6 +5089,18 @@ final class MainViewController: NSViewController {
         workMonitorController?.show(summary: workSummary)
     }
 
+    /// Window 菜单和顶部按钮共用同一个单例入口，避免重复创建监控面板。
+    @objc func showWorkMonitorFromMenu() {
+        showWorkMonitor()
+    }
+
+    /// AppKit 在某些 macOS 版本上不会把 utility NSPanel 计入
+    /// applicationShouldTerminateAfterLastWindowClosed 的窗口数量，因此
+    /// AppDelegate 需要显式询问监控器是否仍可见。
+    var isWorkMonitorVisible: Bool {
+        workMonitorController?.window?.isVisible == true
+    }
+
     private func publishWorkMonitor() {
         workMonitorController?.update(summary: workSummary)
     }
@@ -6819,7 +6831,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        !(mainController?.isWorkMonitorVisible ?? false)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -6830,7 +6842,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        mainController?.shutdownCore()
+        // 关闭主窗口不是 Cmd+Q。若 Work Monitor 仍打开，应用继续运行，
+        // 当前任务/Core 也继续运行；真正退出时由 applicationShouldTerminate
+        // 统一执行 shutdownCore()。
         return true
     }
 
@@ -6984,6 +6998,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(resetItem)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 Nexus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        let windowItem = NSMenuItem()
+        main.addItem(windowItem)
+        let windowMenu = NSMenu(title: "窗口")
+        windowItem.submenu = windowMenu
+        let monitorItem = NSMenuItem(title: "工作监控", action: #selector(MainViewController.showWorkMonitorFromMenu), keyEquivalent: "")
+        monitorItem.target = mainController
+        windowMenu.addItem(monitorItem)
+        NSApp.windowsMenu = windowMenu
 
         let editItem = NSMenuItem()
         main.addItem(editItem)

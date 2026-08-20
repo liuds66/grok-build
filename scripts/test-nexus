@@ -215,6 +215,16 @@ check "Work Monitor 当前工作摘要" grep -q '现在正在做' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/WorkMonitor.swift"
 check "Work Monitor 安全脱敏" grep -q 'WorkMonitorRedaction' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/WorkMonitor.swift"
+check "Work Monitor 独立 NSPanel" grep -q 'NSPanel(' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/WorkMonitor.swift"
+check "Work Monitor 置顶持久化" grep -q 'alwaysOnTopKey' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/WorkMonitor.swift"
+check "Work Monitor 窗口位置恢复" grep -q 'setFrameUsingName' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/WorkMonitor.swift"
+check "Work Monitor 菜单入口" grep -q 'showWorkMonitorFromMenu' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "Work Monitor 独立生命周期" grep -q 'isWorkMonitorVisible' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
 check "Composer 120px" grep -q 'heightAnchor.constraint(equalToConstant: 120)' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
 check "Workspace 禁止横向滚动" grep -q 'scroll.hasHorizontalScroller = false' \
