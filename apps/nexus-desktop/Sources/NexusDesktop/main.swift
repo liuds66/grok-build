@@ -320,6 +320,7 @@ final class ForestBackdropView: NSView {
 
 final class TopBarView: LayerView {
     var onSettings: (() -> Void)?
+    var onWorkMonitor: (() -> Void)?
 
     init() {
         super.init(fillColor: Palette.sidebar.withAlphaComponent(0.68), cornerRadius: 0, strokeColor: Palette.border)
@@ -394,6 +395,8 @@ final class TopBarView: LayerView {
         let bell = iconButton("bell", tooltip: "通知")
         let spark = iconButton("sparkles", tooltip: "Agent 状态")
         spark.contentTintColor = Palette.accent
+        spark.target = self
+        spark.action = #selector(workMonitorClicked)
         let settings = iconButton("gearshape", tooltip: "设置")
         settings.target = self
         settings.action = #selector(settingsClicked)
@@ -451,6 +454,7 @@ final class TopBarView: LayerView {
     }
 
     @objc private func settingsClicked() { onSettings?() }
+    @objc private func workMonitorClicked() { onWorkMonitor?() }
 }
 
 final class BottomStatusBarView: LayerView {
@@ -4829,6 +4833,8 @@ final class MainViewController: NSViewController {
     )
     private let recovery = CoreRecoveryCoordinator()
     private let browserVerification = BrowserVerificationService.shared
+    private var workMonitorController: WorkMonitorWindowController?
+    private var workSummary = WorkActivitySummary.idle
     private var selectedID: UUID?
     private var streamingText = ""
     private var settingsController: SettingsWindowController?
@@ -4929,6 +4935,7 @@ final class MainViewController: NSViewController {
             self?.githubWorkflowCoordinator.cancel(taskID: taskID)
         }
         topBar.onSettings = { [weak self] in self?.openSettings() }
+        topBar.onWorkMonitor = { [weak self] in self?.showWorkMonitor() }
 
         workspacePanel.updateGitHubWorkflow(GitHubWorkflowSnapshot(
             transaction: nil,
@@ -4938,6 +4945,7 @@ final class MainViewController: NSViewController {
         ))
         githubWorkflowCoordinator.onUpdate = { [weak self] snapshot in
             self?.workspacePanel.updateGitHubWorkflow(snapshot)
+            self?.updateWorkGitHub(snapshot)
         }
         githubWorkflowCoordinator.restore()
 
@@ -5074,6 +5082,274 @@ final class MainViewController: NSViewController {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
+    private func showWorkMonitor() {
+        if workMonitorController == nil {
+            workMonitorController = WorkMonitorWindowController()
+        }
+        workMonitorController?.show(summary: workSummary)
+    }
+
+    private func publishWorkMonitor() {
+        workMonitorController?.update(summary: workSummary)
+    }
+
+    /// Reset only the presentation projection when the user changes Session.
+    /// The source of truth remains SessionStore/TaskTransaction/Core state.
+    private func resetWorkMonitor(for session: ChatSession) {
+        let projectURL = URL(fileURLWithPath: session.projectPath)
+        let projectName = projectURL.lastPathComponent.isEmpty ? "未选择项目" : projectURL.lastPathComponent
+        workSummary = .idle
+        workSummary.taskTitle = session.title == "新任务" ? "等待新的开发任务" : WorkMonitorRedaction.text(session.title, limit: 180)
+        workSummary.projectName = projectName
+        workSummary.projectPath = session.projectPath
+        workSummary.status = latestSystemError(in: session) == nil ? "空闲" : "需要处理"
+        workSummary.activity = latestSystemError(in: session) ?? "等待用户提交任务"
+        workSummary.purpose = latestSystemError(in: session) == nil
+            ? "提交任务后，这里会显示 AI 正在处理的对象和目的。"
+            : "查看主窗口中的错误卡片，完成配置或重新连接后再试。"
+        workSummary.coreStatus = BackendLocator.wrapperURL == nil ? "Disconnected" : "Ready"
+        workSummary.modelStatus = modelState(for: session).monitorLabel
+        workSummary.agentStatus = "Agent 空闲"
+        publishWorkMonitor()
+    }
+
+    private func updateWorkMonitorRuntime(core: String? = nil, model: String? = nil, agent: String? = nil) {
+        if let core { workSummary.coreStatus = WorkMonitorRedaction.text(core, limit: 60) }
+        if let model { workSummary.modelStatus = WorkMonitorRedaction.text(model, limit: 60) }
+        if let agent { workSummary.agentStatus = WorkMonitorRedaction.text(agent, limit: 60) }
+        publishWorkMonitor()
+    }
+
+    private func setWorkCurrent(
+        action: String,
+        target: String,
+        targetPath: String? = nil,
+        purpose: String,
+        activity: String,
+        stage: String? = nil,
+        status: String? = nil
+    ) {
+        workSummary.actionType = WorkMonitorRedaction.text(action, limit: 40)
+        workSummary.target = WorkMonitorRedaction.text(target, limit: 180)
+        workSummary.targetPath = targetPath.map { WorkMonitorRedaction.text($0, limit: 180) }
+        workSummary.purpose = WorkMonitorRedaction.text(purpose, limit: 300)
+        workSummary.activity = WorkMonitorRedaction.text(activity, limit: 300)
+        if let stage { workSummary.currentStage = stage }
+        if let status { workSummary.status = status }
+        publishWorkMonitor()
+    }
+
+    private func addWorkRecent(
+        _ title: String,
+        state: WorkMonitorItemState = .success,
+        detail: String? = nil
+    ) {
+        let safeTitle = WorkMonitorRedaction.text(title, limit: 180)
+        guard !safeTitle.isEmpty else { return }
+        if let first = workSummary.recentActivities.first,
+           first.title == safeTitle,
+           first.state == state {
+            return
+        }
+        workSummary.recentActivities.insert(
+            WorkRecentActivity(state: state, title: safeTitle, detail: detail.map { WorkMonitorRedaction.text($0, limit: 120) }),
+            at: 0
+        )
+        workSummary.recentActivities = Array(workSummary.recentActivities.prefix(5))
+        publishWorkMonitor()
+    }
+
+    private func updateWorkMonitorForTool(title: String, status: String, detail: String?, session: ChatSession) {
+        let action = workAction(for: title)
+        let targetInfo = workTarget(for: title, detail: detail, projectPath: session.projectPath)
+        let stage = workStage(for: action)
+        let running = !status.localizedCaseInsensitiveContains("complete")
+            && !status.localizedCaseInsensitiveContains("fail")
+        let failed = status.localizedCaseInsensitiveContains("fail")
+        let activity: String
+        if failed {
+            activity = "当前操作失败，等待处理"
+        } else if running {
+            activity = "正在\(action) \(targetInfo.target)"
+        } else {
+            activity = "已完成\(action) \(targetInfo.target)"
+        }
+        setWorkCurrent(
+            action: action,
+            target: targetInfo.target,
+            targetPath: targetInfo.path,
+            purpose: workPurpose(for: action),
+            activity: activity,
+            stage: stage,
+            status: failed ? "任务失败" : "正在工作"
+        )
+        if let path = targetInfo.path,
+           ["修改", "创建", "删除"].contains(action) {
+            let marker = action == "创建" ? "A" : action == "删除" ? "D" : "M"
+            let file = WorkFileActivity(marker: marker, name: targetInfo.target, path: path)
+            if !workSummary.files.contains(where: { $0.name == file.name && $0.marker == file.marker }) {
+                workSummary.files.insert(file, at: 0)
+                workSummary.files = Array(workSummary.files.prefix(12))
+            }
+        }
+        if failed {
+            addWorkRecent("\(action)未完成", state: .failed, detail: targetInfo.target)
+        } else if !running {
+            addWorkRecent("已完成\(action)\(targetInfo.target)", state: .success)
+        }
+        updateWorkStages()
+    }
+
+    private func workAction(for title: String) -> String {
+        let lowered = title.lowercased()
+        if lowered.contains("browser") || lowered.contains("visual") { return "浏览器验证" }
+        if lowered.contains("github") || lowered.contains("pull request") || lowered.contains("workflow") { return "GitHub" }
+        if lowered.contains("read") || lowered.contains("cat") { return "读取" }
+        if lowered.contains("search") || lowered.contains("grep") || lowered.contains("find") { return "搜索" }
+        if lowered.contains("edit") || lowered.contains("write") || lowered.contains("patch") { return "修改" }
+        if lowered.contains("create") || lowered.contains("touch") { return "创建" }
+        if lowered.contains("delete") || lowered.contains("remove") { return "删除" }
+        if lowered.contains("test") || lowered.contains("check") { return "验证" }
+        if lowered.contains("build") || lowered.contains("compile") { return "构建" }
+        if lowered.contains("bash") || lowered.contains("command") || lowered.contains("terminal") || lowered.contains("shell") { return "运行" }
+        return "分析"
+    }
+
+    private func workStage(for action: String) -> String {
+        switch action {
+        case "修改", "创建", "删除", "运行": return "Builder"
+        case "验证", "构建", "浏览器验证": return "Verifier"
+        case "GitHub": return "Verifier"
+        default: return "Architect"
+        }
+    }
+
+    private func workPurpose(for action: String) -> String {
+        switch action {
+        case "读取", "搜索", "分析": return "建立任务所需的项目上下文，确认修改范围。"
+        case "修改", "创建", "删除": return "把任务要求落实到项目文件，同时保持变更范围可审计。"
+        case "运行": return "执行安全、可追踪的项目命令，获得真实结果。"
+        case "验证", "构建": return "确认当前修改通过项目定义的验证门。"
+        case "浏览器验证": return "检查页面布局、Console、Network 和响应式结果。"
+        case "GitHub": return "同步公开的 Issue、PR 或 CI 状态，不展示凭据和原始参数。"
+        default: return "推进当前任务并为下一阶段准备结果。"
+        }
+    }
+
+    private func workTarget(for title: String, detail: String?, projectPath: String) -> (target: String, path: String?) {
+        let combined = WorkMonitorRedaction.text([title, detail ?? ""].joined(separator: " "), limit: 600)
+        let rawCandidates = combined.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "," || $0 == "(" || $0 == ")" || $0 == "[" || $0 == "]" })
+        let fileExtensions = [".swift", ".rs", ".ts", ".tsx", ".js", ".json", ".toml", ".md", ".cjs", ".py", ".go"]
+        if let raw = rawCandidates.first(where: { candidate in
+            let value = String(candidate).trimmingCharacters(in: CharacterSet(charactersIn: "`'\""))
+            return fileExtensions.contains(where: { value.lowercased().contains($0) })
+        }) {
+            var path = String(raw).trimmingCharacters(in: CharacterSet(charactersIn: "`'\""))
+            if path.hasPrefix(projectPath + "/") { path = String(path.dropFirst(projectPath.count + 1)) }
+            if path.hasPrefix("/") { path = URL(fileURLWithPath: path).lastPathComponent }
+            let name = URL(fileURLWithPath: path).lastPathComponent
+            return (name.isEmpty ? "项目文件" : name, path.isEmpty ? nil : path)
+        }
+        let lowered = combined.lowercased()
+        if lowered.contains("github") || lowered.contains("workflow") { return ("GitHub CI", nil) }
+        if lowered.contains("browser") || lowered.contains("visual") { return ("Browser Verification", nil) }
+        if lowered.contains("project intelligence") || lowered.contains("context") { return ("Project Intelligence", nil) }
+        if lowered.contains("test") || lowered.contains("check") { return ("项目验证", nil) }
+        return (workAction(for: title) == "运行" ? "项目命令" : "项目上下文", nil)
+    }
+
+    private func updateWorkStages(from snapshot: AgentPipelineSnapshot? = nil) {
+        let source = snapshot ?? pipeline.snapshot
+        workSummary.stages = AgentStageName.allCases.map { stage in
+            let state = source.states[stage] ?? .waiting
+            switch state {
+            case .active:
+                return WorkStageDisplay(name: stage.rawValue, state: .active, detail: "正在工作")
+            case .passed:
+                return WorkStageDisplay(name: stage.rawValue, state: .success, detail: "已完成")
+            case .failed:
+                return WorkStageDisplay(name: stage.rawValue, state: .failed, detail: "失败")
+            case .skipped:
+                return WorkStageDisplay(name: stage.rawValue, state: .warning, detail: "跳过")
+            case .waiting:
+                return WorkStageDisplay(name: stage.rawValue, state: .pending, detail: "等待")
+            }
+        }
+        if let active = workSummary.stages.first(where: { $0.state == .active }) {
+            workSummary.currentStage = active.name
+        }
+        publishWorkMonitor()
+    }
+
+    private func updateWorkVerification(_ report: VerificationReport) {
+        workSummary.verificationItems = report.checks.map { check in
+            let state: WorkMonitorItemState
+            let status: String
+            switch check.status {
+            case .pass: state = .success; status = "PASS"
+            case .fail: state = .failed; status = "FAIL"
+            case .skipped: state = .pending; status = "SKIPPED"
+            }
+            return WorkVerificationItem(
+                name: WorkMonitorRedaction.text(check.name, limit: 100),
+                state: state,
+                statusText: status,
+                detail: check.reason.map { WorkMonitorRedaction.text($0, limit: 120) }
+            )
+        }
+        if !workSummary.verificationItems.contains(where: { $0.name == "Reviewer" }) {
+            workSummary.verificationItems.append(WorkVerificationItem(name: "Reviewer", state: .pending, statusText: "等待", detail: nil))
+        }
+        publishWorkMonitor()
+    }
+
+    private func updateWorkVerificationPlan(projectPath: String) {
+        var items = VerificationGate.plannedChecks(projectPath: projectPath).map { name, _, reason in
+            WorkVerificationItem(
+                name: WorkMonitorRedaction.text(name, limit: 100),
+                state: .pending,
+                statusText: reason == nil ? "等待" : "SKIPPED",
+                detail: reason.map { WorkMonitorRedaction.text($0, limit: 120) }
+            )
+        }
+        items.append(WorkVerificationItem(name: "Browser Verify", state: .pending, statusText: "未开始", detail: nil))
+        items.append(WorkVerificationItem(name: "Reviewer", state: .pending, statusText: "等待", detail: nil))
+        workSummary.verificationItems = items
+        publishWorkMonitor()
+    }
+
+    private func updateWorkGitHub(_ snapshot: GitHubWorkflowSnapshot) {
+        guard let metadata = snapshot.metadata else {
+            workSummary.github = nil
+            publishWorkMonitor()
+            return
+        }
+        let workflow = metadata.workflowState
+        let state: WorkMonitorItemState
+        switch workflow {
+        case .waitingCI, .preparing, .planning, .building, .verifying, .reviewing, .repairingCI:
+            state = .active
+        case .readyForHumanMerge, .mergedByHuman:
+            state = .success
+        case .failed, .ciFailed, .remoteSyncFailed, .unauthorized, .rateLimited, .blocked, .interrupted:
+            state = .failed
+        case .cancelled:
+            state = .warning
+        default:
+            state = .pending
+        }
+        let ci = metadata.ciLastObservedState?.rawValue ?? workflow.rawValue
+        workSummary.github = WorkGitHubSummary(
+            repository: metadata.githubRepository?.fullName,
+            issue: metadata.issueNumber.map { "#\($0) \(metadata.issueTitle ?? "")" }.map { WorkMonitorRedaction.text($0, limit: 120) },
+            branch: metadata.taskBranch.map { WorkMonitorRedaction.text($0, limit: 120) },
+            pullRequest: metadata.pullRequestNumber.map { "#\($0) \(metadata.pullRequestRef ?? "")" },
+            ci: WorkMonitorRedaction.text(ci, limit: 100),
+            state: state
+        )
+        publishWorkMonitor()
+    }
+
     func resetLayout() {
         split.resetLayout()
         guard let window = view.window else { return }
@@ -5148,6 +5424,18 @@ final class MainViewController: NSViewController {
     }
 
     private func applySessionState(_ session: ChatSession) {
+        defer {
+            workSummary.modelStatus = modelState(for: session).monitorLabel
+            if BackendLocator.wrapperURL == nil {
+                workSummary.coreStatus = "Disconnected"
+            } else if workSummary.coreStatus.isEmpty {
+                workSummary.coreStatus = "Ready"
+            }
+            if activeTransaction == nil {
+                workSummary.agentStatus = "Agent 空闲"
+            }
+            publishWorkMonitor()
+        }
         guard BackendLocator.wrapperURL != nil else {
             chat.setStatus("Core disconnected", color: Palette.error)
             bottomBar.setCoreStatus("Core 已断开", color: Palette.error)
@@ -5236,6 +5524,7 @@ final class MainViewController: NSViewController {
         refreshSidebar()
         chat.display(session: session)
         workspacePanel.projectPath = session.projectPath
+        resetWorkMonitor(for: session)
         applySessionState(session)
         chat.composer.focus()
     }
@@ -5251,6 +5540,7 @@ final class MainViewController: NSViewController {
         sidebar.select(id: id)
         chat.display(session: session)
         workspacePanel.projectPath = session.projectPath
+        resetWorkMonitor(for: session)
         applySessionState(session)
     }
 
@@ -5289,6 +5579,7 @@ final class MainViewController: NSViewController {
         refreshSidebar()
         chat.display(session: session)
         workspacePanel.projectPath = session.projectPath
+        resetWorkMonitor(for: session)
         chat.setStatus("项目已切换", color: Palette.success)
     }
 
@@ -5337,6 +5628,14 @@ final class MainViewController: NSViewController {
         workspacePanel.showBrowserVerificationStatus("浏览器验证\n\n正在启动本地开发服务器…")
         chat.setStatus("● 浏览器验证 · 正在启动", color: Palette.accent)
         bottomBar.setAgentStatus("浏览器验证", color: Palette.accent)
+        setWorkCurrent(
+            action: "浏览器验证",
+            target: "Browser Verification",
+            purpose: "检查页面布局、Console、Network 和响应式结果。",
+            activity: "正在启动本地浏览器验证",
+            stage: "Verifier",
+            status: "正在验证"
+        )
         browserVerification.verify(
             projectPath: session.projectPath,
             taskID: "manual-\(UUID().uuidString.lowercased())",
@@ -5348,6 +5647,19 @@ final class MainViewController: NSViewController {
                 self.browserVerificationInFlight = false
                 self.workspacePanel.showBrowserVerificationResult(result)
                 let passed = result.status == .passed
+                self.addWorkRecent(
+                    passed ? "浏览器验证已完成" : "浏览器验证未通过",
+                    state: passed ? .success : .failed,
+                    detail: result.summary
+                )
+                self.setWorkCurrent(
+                    action: "浏览器验证",
+                    target: "Browser Verification",
+                    purpose: "检查页面布局、Console、Network 和响应式结果。",
+                    activity: passed ? "浏览器验证已完成" : "浏览器验证未通过",
+                    stage: "Verifier",
+                    status: passed ? "已完成" : "验证失败"
+                )
                 self.chat.setStatus(passed ? "浏览器验证通过" : "浏览器验证\(result.status == .skipped ? "已跳过" : "未通过")", color: passed ? Palette.success : Palette.warning)
                 self.bottomBar.setAgentStatus(passed ? "Agent 空闲" : "浏览器需处理", color: passed ? Palette.secondaryText : Palette.warning)
             }
@@ -5361,11 +5673,27 @@ final class MainViewController: NSViewController {
         guard !prompt.isEmpty else { return }
         guard FileManager.default.fileExists(atPath: session.projectPath) else {
             chat.setStatus("项目目录不存在，请重新选择", color: NSColor.systemRed)
+            setWorkCurrent(
+                action: "等待",
+                target: "项目目录",
+                purpose: "确认当前 Session 仍绑定到有效项目。",
+                activity: "项目目录不存在",
+                stage: "—",
+                status: "需要处理"
+            )
             chooseProject()
             return
         }
         guard NexusConfiguration.shared.hasAPIKey else {
             chat.setStatus("请先在设置中填写 DeepSeek API 密钥", color: Palette.warning)
+            setWorkCurrent(
+                action: "等待",
+                target: "模型配置",
+                purpose: "配置模型凭据后才能启动 Agent 任务。",
+                activity: "等待完成模型配置",
+                stage: "—",
+                status: "模型配置异常"
+            )
             openSettings()
             return
         }
@@ -5400,6 +5728,15 @@ final class MainViewController: NSViewController {
                     self.chat.composer.setRunning(false)
                     self.chat.setStatus("无法创建任务 checkpoint：\(error.localizedDescription)", color: Palette.error)
                     self.bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+                    self.setWorkCurrent(
+                        action: "等待",
+                        target: "任务 checkpoint",
+                        purpose: "在执行任务前建立可回滚快照。",
+                        activity: "无法创建 checkpoint",
+                        stage: "—",
+                        status: "任务失败"
+                    )
+                    self.addWorkRecent("checkpoint 创建失败", state: .failed)
                 }
             }
         }
@@ -5457,6 +5794,22 @@ final class MainViewController: NSViewController {
         activeMessageID = assistant.id
         activeToolFailure = nil
         recovery.reset()
+        workSummary = .idle
+        workSummary.taskTitle = WorkMonitorRedaction.text(session.title, limit: 180)
+        workSummary.projectName = URL(fileURLWithPath: session.projectPath).lastPathComponent
+        workSummary.projectPath = session.projectPath
+        workSummary.elapsedSince = transaction.startedAt
+        workSummary.status = "正在工作"
+        workSummary.currentStage = "Architect"
+        workSummary.actionType = "分析"
+        workSummary.target = "项目上下文"
+        workSummary.purpose = "理解项目结构，规划安全且可验证的执行步骤。"
+        workSummary.activity = "正在读取任务所需的项目上下文"
+        workSummary.agentStatus = "Agent 正在工作"
+        updateWorkStages()
+        updateWorkVerificationPlan(projectPath: session.projectPath)
+        addWorkRecent("已创建任务 checkpoint", state: .success, detail: "准备开始")
+        publishWorkMonitor()
         chat.composer.setRunning(true)
         chat.setStatus("● Planning", color: Palette.accent)
         bottomBar.setAgentStatus("Planning", color: Palette.accent)
@@ -5530,6 +5883,14 @@ final class MainViewController: NSViewController {
                 store.update(session)
             }
             chat.updateStreamingText(streamingText)
+            setWorkCurrent(
+                action: "分析",
+                target: "任务响应",
+                purpose: "根据当前项目上下文准备可执行的修改与验证步骤。",
+                activity: "正在整理 Agent 输出",
+                stage: "Architect",
+                status: "正在工作"
+            )
         case .thought(let thought):
             recovery.reset()
             let short = thought.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5540,6 +5901,14 @@ final class MainViewController: NSViewController {
             updateTransaction { transaction in
                 transaction.agentStages.append("Architect: \(state)")
             }
+            setWorkCurrent(
+                action: "分析",
+                target: "任务计划",
+                purpose: "将任务拆分为可验证的执行步骤，不展示模型内部推理。",
+                activity: "正在分析任务并协调执行",
+                stage: "Architect",
+                status: "正在工作"
+            )
         case .tool(let id, let title, let status, let detail):
             recovery.reset()
             let display = localizedToolTitle(title, status: status, detail: detail)
@@ -5568,6 +5937,7 @@ final class MainViewController: NSViewController {
                 let auditDetail = detail.map { " — \($0)" } ?? ""
                 transaction.toolCalls.append("\(title): \(status)\(auditDetail)")
             }
+            updateWorkMonitorForTool(title: title, status: status, detail: detail, session: session)
             if status.localizedCaseInsensitiveContains("fail") {
                 let reason = detail ?? "工具执行失败，任务未完成。"
                 activeToolFailure = localizedToolFailure(reason, action: title)
@@ -5593,6 +5963,15 @@ final class MainViewController: NSViewController {
             updateTransaction { transaction in
                 transaction.agentStages.append("Architect: plan updated")
             }
+            setWorkCurrent(
+                action: "分析",
+                target: "执行计划",
+                purpose: "明确接下来的修改对象和验证步骤。",
+                activity: "正在整理执行计划",
+                stage: "Architect",
+                status: "正在工作"
+            )
+            addWorkRecent("已更新执行计划", state: .success)
         case .ended(let backendID):
             // `end` is the only authoritative runtime completion signal.  A
             // browser/server callback may arrive before or after it, but a
@@ -5619,6 +5998,15 @@ final class MainViewController: NSViewController {
             session.backendCreated = true
             session.updatedAt = Date()
             store.update(session)
+            setWorkCurrent(
+                action: "验证",
+                target: "项目测试",
+                purpose: "确认修改通过项目验证，再进入 Reviewer。",
+                activity: "正在准备验证门",
+                stage: "Verifier",
+                status: "正在验证"
+            )
+            addWorkRecent("Agent 运行阶段已完成", state: .success)
             beginVerification(session: session, messageID: messageID)
         case .failed(let message, let cancellationSource):
             recovery.reset()
@@ -5634,6 +6022,15 @@ final class MainViewController: NSViewController {
                     _ = transaction.transition(to: .failed)
                 }
             }
+            setWorkCurrent(
+                action: "等待",
+                target: "任务结果",
+                purpose: "保留失败原因，避免在验证未通过时误报完成。",
+                activity: WorkMonitorRedaction.text(message, limit: 220),
+                stage: "—",
+                status: cancellationSource == nil ? "任务失败" : "已取消"
+            )
+            addWorkRecent(cancellationSource == nil ? "任务失败" : "任务已取消", state: cancellationSource == nil ? .failed : .warning, detail: message)
             finishFailure(message, session: session, messageID: messageID)
             activeTransaction = nil
             clearActiveTask()
@@ -5646,22 +6043,58 @@ final class MainViewController: NSViewController {
         case .stopped:
             bottomBar.setCoreStatus("Core 已停止", color: Palette.secondaryText)
             chat.setStatus("Core 已停止", color: Palette.secondaryText)
+            updateWorkMonitorRuntime(core: "Stopped", agent: "Agent 空闲")
         case .starting:
             bottomBar.setCoreStatus("Rust Core", color: Palette.warning)
             chat.setStatus("正在启动 Core", color: Palette.warning)
+            setWorkCurrent(
+                action: "恢复",
+                target: "AI Dev One Core",
+                purpose: "启动本地运行时，确保任务执行链恢复。",
+                activity: "正在启动 Agent Runtime",
+                stage: activeTransaction == nil ? "—" : workSummary.currentStage,
+                status: "正在恢复"
+            )
+            updateWorkMonitorRuntime(core: "Starting")
         case .ready:
             bottomBar.setCoreStatus("Rust Core", color: Palette.success)
+            updateWorkMonitorRuntime(core: "Ready")
             if activeTransaction == nil {
                 chat.setStatus("Core 已恢复，可重新运行任务", color: Palette.success)
                 bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+                workSummary.status = "空闲"
+                workSummary.activity = "等待用户提交任务"
+                workSummary.actionType = "等待"
+                workSummary.target = "暂无活动"
+                workSummary.currentStage = "—"
+                updateWorkStages()
             }
         case .restarting:
             bottomBar.setCoreStatus("Core 重启中", color: Palette.warning)
             chat.setStatus("Core 正在恢复", color: Palette.warning)
+            setWorkCurrent(
+                action: "恢复",
+                target: "AI Dev One Core",
+                purpose: "重新连接运行时；当前任务不会自动重放。",
+                activity: "正在重新启动 Agent Runtime",
+                stage: activeTransaction == nil ? "—" : workSummary.currentStage,
+                status: "正在恢复"
+            )
+            updateWorkMonitorRuntime(core: "Restarting")
         case .disconnected:
             bottomBar.setCoreStatus("Core 已断开", color: Palette.error)
+            updateWorkMonitorRuntime(core: "Disconnected")
             if activeTransaction != nil {
                 chat.setStatus("Core 已断开，任务已中断，正在恢复 Core", color: Palette.warning)
+                setWorkCurrent(
+                    action: "恢复",
+                    target: "AI Dev One Core",
+                    purpose: "保存中断状态，等待运行时恢复后由用户选择重试或回滚。",
+                    activity: "Core 已断开，任务已中断",
+                    stage: workSummary.currentStage,
+                    status: "已中断"
+                )
+                addWorkRecent("Core 已断开，任务已中断", state: .warning)
                 _ = finalization.interrupt(source: .coreCrash)
                 updateTransaction { transaction in
                     _ = transaction.transition(to: .interrupted, cancellationSource: .coreCrash)
@@ -5676,6 +6109,14 @@ final class MainViewController: NSViewController {
                 verificationInFlight = false
             } else {
                 chat.setStatus("Core disconnected", color: Palette.error)
+                setWorkCurrent(
+                    action: "恢复",
+                    target: "AI Dev One Core",
+                    purpose: "等待用户重新启动本地运行时。",
+                    activity: "Core 已断开",
+                    stage: "—",
+                    status: "Core 已断开"
+                )
             }
             runner.scheduleAutomaticRecovery { [weak self] nextState in
                 guard let self else { return }
@@ -5687,6 +6128,16 @@ final class MainViewController: NSViewController {
             bottomBar.setCoreStatus("Core 失败", color: Palette.error)
             chat.setStatus("Core 无法恢复", color: Palette.error)
             bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            setWorkCurrent(
+                action: "恢复",
+                target: "AI Dev One Core",
+                purpose: "运行时恢复失败，需要用户重新启动 Core。",
+                activity: "Core 无法恢复",
+                stage: "—",
+                status: "Core 无法恢复"
+            )
+            addWorkRecent("Core 无法恢复", state: .failed, detail: "可在底部状态栏重新启动")
+            updateWorkMonitorRuntime(core: "Failed", agent: "Agent 空闲")
         }
     }
 
@@ -5706,6 +6157,17 @@ final class MainViewController: NSViewController {
             current.agentStages.append("Verifier: testing")
             current.pipeline = pipeline.snapshot
         }
+        updateWorkStages()
+        updateWorkVerificationPlan(projectPath: session.projectPath)
+        setWorkCurrent(
+            action: "验证",
+            target: "项目测试",
+            purpose: "确认修改通过项目定义的 typecheck、lint、test 或 build 检查。",
+            activity: "正在运行项目验证",
+            stage: "Verifier",
+            status: "正在验证"
+        )
+        addWorkRecent("Builder 已完成，Verifier 开始工作", state: .success)
         chat.setStatus("● Verifier · 正在验证", color: Palette.accent)
         bottomBar.setAgentStatus("Agent 运行中", color: Palette.accent)
         VerificationGate.evaluateAsync(projectPath: session.projectPath) { [weak self] report in
@@ -5716,6 +6178,16 @@ final class MainViewController: NSViewController {
                 current.verification = report.checks
                 current.pipeline = self.pipeline.snapshot
             }
+            self.updateWorkVerification(report)
+            self.setWorkCurrent(
+                action: "验证",
+                target: "项目测试",
+                purpose: report.hasFailure ? "识别失败检查并阻止任务误报完成。" : "确认项目验证结果，再进入 Reviewer。",
+                activity: report.hasFailure ? "项目验证发现失败项" : "项目验证已完成，准备 Reviewer",
+                stage: "Verifier",
+                status: report.hasFailure ? "验证失败" : "正在验证"
+            )
+            self.addWorkRecent(report.hasFailure ? "项目验证未通过" : "项目验证已完成", state: report.hasFailure ? .failed : .success, detail: "(report.checks.filter { $0.status == .pass }.count) 项通过")
             if report.hasFailure {
                 _ = self.pipeline.fail(.verifier)
                 self.updateTransaction { current in
@@ -5749,6 +6221,19 @@ final class MainViewController: NSViewController {
                         guard let self else { return }
                         self.browserVerificationInFlight = false
                         self.workspacePanel.showBrowserVerificationResult(browserResult)
+                        self.setWorkCurrent(
+                            action: "浏览器验证",
+                            target: "Browser Verification",
+                            purpose: "检查页面布局、Console、Network 和响应式结果。",
+                            activity: browserResult.status == .passed ? "桌面视口验证已完成" : "桌面视口验证未通过",
+                            stage: "Verifier",
+                            status: browserResult.status == .passed ? "正在验证" : "验证失败"
+                        )
+                        self.addWorkRecent(
+                            browserResult.status == .passed ? "Desktop 浏览器验证已完成" : "Desktop 浏览器验证未通过",
+                            state: browserResult.status == .passed ? .success : .failed,
+                            detail: browserResult.summary
+                        )
                         self.finalization.browserCleanupCompleted()
                         self.updateTransaction { current in
                             current.verification.append(self.browserVerificationCheck(browserResult))
@@ -5857,6 +6342,19 @@ final class MainViewController: NSViewController {
                 guard let self else { return }
                 self.browserVerificationInFlight = false
                 self.workspacePanel.showBrowserVerificationResult(browserResult)
+                self.setWorkCurrent(
+                    action: "浏览器验证",
+                    target: "Browser Verification · Mobile",
+                    purpose: "确认移动端视口没有布局溢出或阻塞性错误。",
+                    activity: browserResult.status == .passed ? "移动视口验证已完成" : "移动视口验证未通过",
+                    stage: "Verifier",
+                    status: browserResult.status == .passed ? "正在验证" : "验证失败"
+                )
+                self.addWorkRecent(
+                    browserResult.status == .passed ? "Mobile 浏览器验证已完成" : "Mobile 浏览器验证未通过",
+                    state: browserResult.status == .passed ? .success : .failed,
+                    detail: browserResult.summary
+                )
                 self.finalization.browserCleanupCompleted()
                 self.updateTransaction { current in
                     current.verification.append(self.browserVerificationCheck(browserResult, viewport: .mobile))
@@ -5912,6 +6410,16 @@ final class MainViewController: NSViewController {
         if pipeline.activeStage == .reviewer { _ = pipeline.pass(.reviewer) }
         let pipelinePassed = pipeline.canComplete
         _ = finalization.finishReviewer(passed: pipelinePassed)
+        updateWorkStages()
+        setWorkCurrent(
+            action: "验证",
+            target: "Reviewer",
+            purpose: "完成最终审查，只有 Verifier 和 Reviewer 都通过才允许任务完成。",
+            activity: pipelinePassed ? "Reviewer 已完成最终审查" : "Reviewer 未通过",
+            stage: "Reviewer",
+            status: pipelinePassed ? "已完成" : "任务失败"
+        )
+        addWorkRecent(pipelinePassed ? "Reviewer 审查已通过" : "Reviewer 审查未通过", state: pipelinePassed ? .success : .failed)
         updateTransaction { current in
             current.pipeline = pipeline.snapshot
             current.agentStages.append("Reviewer: review passed")
@@ -5973,6 +6481,11 @@ final class MainViewController: NSViewController {
         update(&transaction)
         activeTransaction = transaction
         transactionStore.upsert(transaction)
+        updateWorkStages(from: transaction.pipeline)
+        if transaction.github != nil {
+            let snapshot = GitHubWorkflowSnapshot(transaction: transaction, restoring: false, error: nil, activePollerCount: githubWorkflowCoordinator.activePollerCount)
+            updateWorkGitHub(snapshot)
+        }
         // GitHub CI is a long-lived task boundary.  Once the runtime records
         // a waiting_ci transaction, hand the same persisted object to the
         // app-level coordinator so polling survives view refreshes and a
@@ -6011,6 +6524,14 @@ final class MainViewController: NSViewController {
 
     private func finishRun(status: String, color: NSColor) {
         recordProjectKnowledge(finalState: status == "已完成" ? "completed" : nil)
+        workSummary.status = status
+        workSummary.actionType = status == "已完成" ? "验证" : "等待"
+        workSummary.target = status == "已完成" ? "任务结果" : "暂无活动"
+        workSummary.activity = status == "已完成" ? "任务已完成，验证通过" : status
+        workSummary.purpose = status == "已完成" ? "保留真实验证结果，便于从 Work Monitor 快速复盘。" : "等待下一步操作。"
+        workSummary.agentStatus = status == "已完成" ? "Agent 完成" : status
+        updateWorkStages()
+        addWorkRecent(status == "已完成" ? "任务已完成" : status, state: status == "已完成" ? .success : .warning)
         chat.finishStreaming()
         chat.composer.setRunning(false)
         chat.setStatus(status, color: color)
@@ -6069,6 +6590,15 @@ final class MainViewController: NSViewController {
             chat.composer.setRunning(false)
             chat.setStatus("任务已取消", color: Palette.secondaryText)
             bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            setWorkCurrent(
+                action: "等待",
+                target: "任务 checkpoint",
+                purpose: "取消尚未开始执行的任务，不留下半成品状态。",
+                activity: "任务已取消",
+                stage: "—",
+                status: "已取消"
+            )
+            addWorkRecent("任务已取消", state: .warning)
             return
         }
         guard activeTransaction != nil,
@@ -6087,6 +6617,14 @@ final class MainViewController: NSViewController {
             current.pipeline = pipeline.snapshot
         }
         chat.setStatus("正在停止", color: Palette.warning)
+        setWorkCurrent(
+            action: "等待",
+            target: "当前任务",
+            purpose: "停止后保留事务状态，避免后续事件把任务误报为完成。",
+            activity: "正在停止任务",
+            stage: workSummary.currentStage,
+            status: "正在停止"
+        )
         browserVerification.cancel()
         finishFailure("任务已停止。", session: session, messageID: messageID)
         activeTransaction = nil
