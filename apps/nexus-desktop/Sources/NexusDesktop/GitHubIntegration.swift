@@ -17,6 +17,8 @@ enum GitHubAuthState: String, Codable, Equatable {
 }
 
 enum GitHubWorkflowState: String, Codable, Equatable {
+    case idle
+    case preparing
     case issueLoaded = "issue_loaded"
     case planning
     case workspacePrepared = "workspace_prepared"
@@ -27,6 +29,7 @@ enum GitHubWorkflowState: String, Codable, Equatable {
     case pushing
     case creatingPR = "creating_pr"
     case waitingCI = "waiting_ci"
+    case ciFailed = "ci_failed"
     case repairingCI = "repairing_ci"
     case readyForHumanMerge = "ready_for_human_merge"
     case mergedByHuman = "merged_by_human"
@@ -136,6 +139,33 @@ struct GitHubCIRun: Codable, Equatable {
     let url: String?
     let failureKind: CIFailureKind?
     let evidence: String?
+    /// GitHub increments this value when an existing Actions run is rerun.
+    /// It is optional because PR check rows do not always expose it.
+    let attempt: Int?
+
+    init(
+        id: String,
+        workflow: String,
+        job: String?,
+        checkName: String?,
+        status: GitHubCIStatus,
+        conclusion: String?,
+        url: String?,
+        failureKind: CIFailureKind?,
+        evidence: String?,
+        attempt: Int? = nil
+    ) {
+        self.id = id
+        self.workflow = workflow
+        self.job = job
+        self.checkName = checkName
+        self.status = status
+        self.conclusion = conclusion
+        self.url = url
+        self.failureKind = failureKind
+        self.evidence = evidence
+        self.attempt = attempt
+    }
 }
 
 /// GitHub fields stored with a TaskTransaction.  This object contains only
@@ -151,7 +181,12 @@ struct GitHubTaskMetadata: Codable, Equatable {
     var remoteCommitSHA: String?
     var pullRequestNumber: Int?
     var pullRequestURL: String?
+    var pullRequestRef: String?
     var ciRuns: [GitHubCIRun]
+    var ciRunId: String?
+    var ciRunAttempt: Int?
+    var ciCheckNames: [String]?
+    var ciLastObservedState: GitHubCIStatus?
     var ciRepairRounds: Int
     var ciFinalState: GitHubCIStatus?
     var mergeState: String?
@@ -177,7 +212,12 @@ struct GitHubTaskMetadata: Codable, Equatable {
         self.remoteCommitSHA = nil
         self.pullRequestNumber = nil
         self.pullRequestURL = nil
+        self.pullRequestRef = nil
         self.ciRuns = []
+        self.ciRunId = nil
+        self.ciRunAttempt = nil
+        self.ciCheckNames = nil
+        self.ciLastObservedState = nil
         self.ciRepairRounds = 0
         self.ciFinalState = nil
         self.mergeState = nil
@@ -306,8 +346,13 @@ enum GitHubRemotePolicy {
 }
 
 struct GitHubWorkflowMachine {
-    private(set) var state: GitHubWorkflowState = .issueLoaded
-    private(set) var history: [GitHubWorkflowState] = [.issueLoaded]
+    private(set) var state: GitHubWorkflowState
+    private(set) var history: [GitHubWorkflowState]
+
+    init(initialState: GitHubWorkflowState = .issueLoaded) {
+        state = initialState
+        history = [initialState]
+    }
 
     @discardableResult
     mutating func transition(to next: GitHubWorkflowState) -> Bool {
@@ -320,7 +365,9 @@ struct GitHubWorkflowMachine {
 
     private func allowed(from current: GitHubWorkflowState, to next: GitHubWorkflowState) -> Bool {
         switch (current, next) {
-        case (.issueLoaded, .planning),
+        case (.idle, .preparing), (.idle, .issueLoaded),
+             (.preparing, .issueLoaded), (.preparing, .blocked), (.preparing, .failed), (.preparing, .cancelled),
+             (.issueLoaded, .planning),
              (.planning, .workspacePrepared), (.planning, .blocked), (.planning, .cancelled), (.planning, .failed), (.planning, .interrupted),
              (.workspacePrepared, .building), (.workspacePrepared, .blocked), (.workspacePrepared, .cancelled), (.workspacePrepared, .interrupted),
              (.building, .verifying), (.building, .cancelled), (.building, .failed), (.building, .interrupted),
@@ -329,7 +376,8 @@ struct GitHubWorkflowMachine {
              (.committing, .pushing), (.committing, .failed), (.committing, .interrupted),
              (.pushing, .creatingPR), (.pushing, .remoteSyncFailed), (.pushing, .unauthorized), (.pushing, .rateLimited), (.pushing, .failed), (.pushing, .cancelled), (.pushing, .interrupted),
              (.creatingPR, .waitingCI), (.creatingPR, .remoteSyncFailed), (.creatingPR, .unauthorized), (.creatingPR, .failed), (.creatingPR, .cancelled), (.creatingPR, .interrupted),
-             (.waitingCI, .repairingCI), (.waitingCI, .readyForHumanMerge), (.waitingCI, .remoteSyncFailed), (.waitingCI, .rateLimited), (.waitingCI, .cancelled), (.waitingCI, .interrupted),
+             (.waitingCI, .ciFailed), (.waitingCI, .repairingCI), (.waitingCI, .readyForHumanMerge), (.waitingCI, .remoteSyncFailed), (.waitingCI, .rateLimited), (.waitingCI, .cancelled), (.waitingCI, .interrupted),
+             (.ciFailed, .repairingCI), (.ciFailed, .cancelled), (.ciFailed, .blocked), (.ciFailed, .failed),
              (.repairingCI, .building), (.repairingCI, .verifying), (.repairingCI, .reviewing), (.repairingCI, .failed), (.repairingCI, .cancelled), (.repairingCI, .interrupted),
              (.readyForHumanMerge, .mergedByHuman):
             return true
@@ -853,13 +901,22 @@ final class GitHubCLIProvider: GitHubProvider {
         }
         let safeBody = GitHubRedaction.text(body, limit: 12_000)
         let safeTitle = GitHubRedaction.text(title, limit: 240)
-        ghJSON(["pr", "create", "--repo", repository.fullName, "--head", head, "--base", base, "--title", safeTitle, "--body", safeBody, "--json", "number,title,body,headRefName,baseRefName,url,state,isDraft,merged"]) { (result: Result<CLIPullRequest, Error>) in
-            completion(result.map { $0.model })
+        gh(["pr", "create", "--repo", repository.fullName, "--head", head, "--base", base, "--title", safeTitle, "--body", safeBody]) { [weak self] result in
+            guard let self else { return }
+            guard result.code == 0 else {
+                completion(.failure(GitHubError.commandFailed(result.output)))
+                return
+            }
+            guard let number = Self.pullRequestNumber(from: result.output, repository: repository) else {
+                completion(.failure(GitHubError.commandFailed("gh pr create 未返回可识别的 PR URL")))
+                return
+            }
+            self.getPullRequest(repository: repository, number: number, completion: completion)
         }
     }
 
     func getPullRequest(repository: GitHubRepositoryBinding, number: Int, completion: @escaping GitHubCompletion<GitHubPullRequest>) {
-        ghJSON(["pr", "view", String(number), "--repo", repository.fullName, "--json", "number,title,body,headRefName,baseRefName,url,state,isDraft,merged"]) { (result: Result<CLIPullRequest, Error>) in completion(result.map(\.model)) }
+        ghJSON(["pr", "view", String(number), "--repo", repository.fullName, "--json", "number,title,body,headRefName,baseRefName,url,state,isDraft,mergedAt"]) { (result: Result<CLIPullRequest, Error>) in completion(result.map(\.model)) }
     }
 
     func updatePullRequest(repository: GitHubRepositoryBinding, number: Int, title: String?, body: String?, completion: @escaping GitHubCompletion<GitHubPullRequest>) {
@@ -878,15 +935,40 @@ final class GitHubCLIProvider: GitHubProvider {
 
     func getChecks(repository: GitHubRepositoryBinding, pullRequest: Int, completion: @escaping GitHubCompletion<[GitHubCIRun]>) {
         ghJSON(["pr", "checks", String(pullRequest), "--repo", repository.fullName, "--json", "name,state,bucket,link,workflow"]) { (result: Result<[CLICheck], Error>) in
-            completion(result.map { $0.map { check in GitHubCIRun(id: check.name, workflow: check.workflow ?? "", job: check.name, checkName: check.name, status: Self.ciStatus(state: check.state, bucket: check.bucket), conclusion: check.state, url: check.link, failureKind: nil, evidence: nil) } })
+            completion(result.map { $0.map { check in
+                GitHubCIRun(
+                    id: Self.runID(from: check.link) ?? check.name,
+                    workflow: check.workflow ?? "",
+                    job: check.name,
+                    checkName: check.name,
+                    status: Self.ciStatus(state: check.state, bucket: check.bucket),
+                    conclusion: check.state,
+                    url: check.link,
+                    failureKind: nil,
+                    evidence: nil
+                )
+            } })
         }
     }
 
     func getWorkflowRuns(repository: GitHubRepositoryBinding, branch: String?, completion: @escaping GitHubCompletion<[GitHubCIRun]>) {
-        var args = ["run", "list", "--repo", repository.fullName, "--limit", "30", "--json", "databaseId,name,status,conclusion,url,headBranch,workflowName"]
+        var args = ["run", "list", "--repo", repository.fullName, "--limit", "30", "--json", "databaseId,attempt,name,status,conclusion,url,headBranch,workflowName"]
         if let branch { args += ["--branch", branch] }
         ghJSON(args) { (result: Result<[CLIWorkflowRun], Error>) in
-            completion(result.map { $0.map { run in GitHubCIRun(id: String(run.databaseId), workflow: run.workflowName ?? run.name, job: nil, checkName: nil, status: Self.ciStatus(state: run.status, bucket: run.conclusion), conclusion: run.conclusion, url: run.url, failureKind: nil, evidence: nil) } })
+            completion(result.map { $0.map { run in
+                GitHubCIRun(
+                    id: String(run.databaseId),
+                    workflow: run.workflowName ?? run.name,
+                    job: nil,
+                    checkName: nil,
+                    status: Self.ciStatus(state: run.status, bucket: run.conclusion),
+                    conclusion: run.conclusion,
+                    url: run.url,
+                    failureKind: nil,
+                    evidence: nil,
+                    attempt: run.attempt
+                )
+            } })
         }
     }
 
@@ -980,6 +1062,26 @@ final class GitHubCLIProvider: GitHubProvider {
         return .unknown
     }
 
+    private static func pullRequestNumber(from output: String, repository: GitHubRepositoryBinding) -> Int? {
+        let escapedOwner = NSRegularExpression.escapedPattern(for: repository.owner)
+        let escapedRepo = NSRegularExpression.escapedPattern(for: repository.repo)
+        let pattern = "https://github\\.com/\(escapedOwner)/\(escapedRepo)/pull/([0-9]+)"
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(output.startIndex..<output.endIndex, in: output)
+        guard let match = expression.firstMatch(in: output, range: range), match.numberOfRanges > 1,
+              let numberRange = Range(match.range(at: 1), in: output) else { return nil }
+        return Int(output[numberRange])
+    }
+
+    private static func runID(from link: String?) -> String? {
+        guard let link,
+              let expression = try? NSRegularExpression(pattern: #"/actions/runs/([0-9]+)(?:/|$)"#) else { return nil }
+        let range = NSRange(link.startIndex..<link.endIndex, in: link)
+        guard let match = expression.firstMatch(in: link, range: range), match.numberOfRanges > 1,
+              let valueRange = Range(match.range(at: 1), in: link) else { return nil }
+        return String(link[valueRange])
+    }
+
     private struct CLIRepository: Decodable {
         let id: String?
         let url: String
@@ -1007,14 +1109,15 @@ final class GitHubCLIProvider: GitHubProvider {
         let url: String
         let state: String
         let isDraft: Bool
-        let merged: Bool
-        var model: GitHubPullRequest { GitHubPullRequest(number: number, title: GitHubRedaction.text(title, limit: 240), body: GitHubRedaction.text(body, limit: 12_000), headBranch: headRefName, baseBranch: baseRefName, url: url, state: state, isDraft: isDraft, merged: merged) }
+        let mergedAt: String?
+        var model: GitHubPullRequest { GitHubPullRequest(number: number, title: GitHubRedaction.text(title, limit: 240), body: GitHubRedaction.text(body, limit: 12_000), headBranch: headRefName, baseBranch: baseRefName, url: url, state: state, isDraft: isDraft, merged: mergedAt != nil) }
     }
 
     private struct CLICheck: Decodable { let name: String; let state: String?; let bucket: String?; let link: String?; let workflow: String? }
 
     private struct CLIWorkflowRun: Decodable {
         let databaseId: Int
+        let attempt: Int?
         let name: String
         let status: String?
         let conclusion: String?
@@ -1100,6 +1203,16 @@ final class GitHubAutonomousWorkflow {
         self.provider = provider
         self.metadata = GitHubTaskMetadata(autonomousMode: autonomousMode)
         provider.autonomousMode = autonomousMode
+    }
+
+    /// Restores an already-persisted workflow without replaying Builder,
+    /// verification, push or PR creation. The desktop lifecycle coordinator
+    /// uses repository + PR as the recovery anchor and only reattaches CI.
+    init(provider: GitHubProvider, metadata: GitHubTaskMetadata) {
+        self.provider = provider
+        self.metadata = metadata
+        self.machine = GitHubWorkflowMachine(initialState: metadata.workflowState)
+        provider.autonomousMode = metadata.autonomousMode
     }
 
     var autonomousMode: Bool {
@@ -1325,6 +1438,11 @@ final class GitHubAutonomousWorkflow {
                 self.lastError = error.localizedDescription
                 completion(.failure(error))
             case .success(let checks):
+                // A late provider callback after an explicit user cancel is
+                // observational only and must never resurrect the task.
+                guard self.metadata.workflowState != .cancelled else {
+                    return completion(.success(.cancelled))
+                }
                 checks.forEach { self.metadata.append($0) }
                 let status = Self.aggregate(checks)
                 self.metadata.ciFinalState = status
@@ -1332,7 +1450,8 @@ final class GitHubAutonomousWorkflow {
                     _ = self.machine.transition(to: .readyForHumanMerge)
                     self.metadata.record(.readyForHumanMerge)
                 } else if status == .failed {
-                    self.metadata.record(.waitingCI)
+                    _ = self.machine.transition(to: .ciFailed)
+                    self.metadata.record(.ciFailed)
                 }
                 self.publish()
                 completion(.success(status))
@@ -1342,7 +1461,8 @@ final class GitHubAutonomousWorkflow {
 
     @discardableResult
     func beginCIFailureRepair(_ kind: CIFailureKind) -> Bool {
-        guard machine.state == .waitingCI, repairLoop.begin(kind: kind) else { return false }
+        guard machine.state == .ciFailed || machine.state == .waitingCI,
+              repairLoop.begin(kind: kind) else { return false }
         guard machine.transition(to: .repairingCI) else { return false }
         metadata.ciRepairRounds = repairLoop.rounds
         metadata.record(.repairingCI)
@@ -1351,6 +1471,7 @@ final class GitHubAutonomousWorkflow {
     }
 
     func cancel() {
+        guard metadata.workflowState == .waitingCI || metadata.workflowState == .ciFailed || metadata.workflowState == .repairingCI else { return }
         ciPollWorkItem?.cancel()
         ciPollWorkItem = nil
         _ = machine.transition(to: .cancelled)
@@ -1369,6 +1490,9 @@ final class GitHubAutonomousWorkflow {
     }
 
     func recoverAfterAppRestart(completion: @escaping GitHubCompletion<GitHubWorkflowState>) {
+        guard metadata.workflowState != .cancelled else {
+            return completion(.success(.cancelled))
+        }
         guard let repository = metadata.githubRepository, let number = metadata.pullRequestNumber else {
             return completion(.success(metadata.workflowState))
         }

@@ -3072,6 +3072,9 @@ final class WorkspacePanelView: LayerView {
     private let actionButton = NSButton(title: "刷新", target: nil, action: nil)
     private let browserButton = NSButton(title: "浏览器验证", target: nil, action: nil)
     private let screenshotButton = NSButton(title: "查看截图", target: nil, action: nil)
+    private let githubActions = NSStackView()
+    private let githubCancelButton = NSButton(title: "停止等待", target: nil, action: nil)
+    private let githubPRButton = NSButton(title: "查看 PR", target: nil, action: nil)
     private let summaryLabel = label("", size: 11, color: Palette.secondaryText)
     private let intelligence = ProjectIntelligenceService.shared
     private let githubProvider = GitHubCLIProvider()
@@ -3079,6 +3082,8 @@ final class WorkspacePanelView: LayerView {
     private var screenshotWindow: NSWindow?
     private var latestIntelligence: ProjectIntelligenceOverview?
     private var intelligenceRequestID = UUID()
+    private var githubActionsHeight: NSLayoutConstraint?
+    private var githubSnapshot = GitHubWorkflowSnapshot.idle
 
     var projectPath: String = "" {
         didSet {
@@ -3124,6 +3129,7 @@ final class WorkspacePanelView: LayerView {
     }
     var onClose: (() -> Void)?
     var onBrowserVerification: (() -> Void)?
+    var onCancelGitHubTask: ((String) -> Void)?
 
     init() {
         super.init(fillColor: Palette.elevated.withAlphaComponent(0.38), cornerRadius: 14, strokeColor: Palette.border.withAlphaComponent(0.72))
@@ -3259,6 +3265,23 @@ final class WorkspacePanelView: LayerView {
         screenshotButton.toolTip = "打开最近一次浏览器验证截图"
         screenshotButton.isHidden = true
 
+        githubActions.translatesAutoresizingMaskIntoConstraints = false
+        githubActions.orientation = .horizontal
+        githubActions.alignment = .centerY
+        githubActions.distribution = .gravityAreas
+        githubActions.spacing = 8
+        githubCancelButton.bezelStyle = .rounded
+        githubCancelButton.target = self
+        githubCancelButton.action = #selector(cancelGitHubWorkflowClicked)
+        githubCancelButton.toolTip = "停止 AI Dev One 的后续 CI 等待；不会关闭 PR 或取消 GitHub Actions"
+        githubPRButton.bezelStyle = .rounded
+        githubPRButton.target = self
+        githubPRButton.action = #selector(viewGitHubPullRequestClicked)
+        githubPRButton.toolTip = "在浏览器中查看远程 Pull Request"
+        githubActions.addArrangedSubview(githubCancelButton)
+        githubActions.addArrangedSubview(githubPRButton)
+        githubActions.isHidden = true
+
         let separator = LayerView(fillColor: Palette.border)
         separator.translatesAutoresizingMaskIntoConstraints = false
 
@@ -3275,6 +3298,10 @@ final class WorkspacePanelView: LayerView {
         addSubview(actionButton)
         addSubview(browserButton)
         addSubview(screenshotButton)
+        addSubview(githubActions)
+
+        let githubHeight = githubActions.heightAnchor.constraint(equalToConstant: 0)
+        githubActionsHeight = githubHeight
 
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
@@ -3313,7 +3340,12 @@ final class WorkspacePanelView: LayerView {
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.topAnchor.constraint(equalTo: separator.bottomAnchor),
-            scroll.bottomAnchor.constraint(equalTo: commandField.topAnchor, constant: -10),
+            scroll.bottomAnchor.constraint(equalTo: githubActions.topAnchor, constant: -8),
+
+            githubActions.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 12),
+            githubActions.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            githubActions.bottomAnchor.constraint(equalTo: commandField.topAnchor, constant: -8),
+            githubHeight,
 
             commandField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             commandField.trailingAnchor.constraint(equalTo: screenshotButton.leadingAnchor, constant: -8),
@@ -3373,12 +3405,27 @@ final class WorkspacePanelView: LayerView {
         }
     }
 
+    func updateGitHubWorkflow(_ snapshot: GitHubWorkflowSnapshot) {
+        githubSnapshot = snapshot
+        if segmented.selectedSegment == 3 {
+            updateMode()
+            showTools()
+        }
+    }
+
     private func updateMode() {
         let terminal = segmented.selectedSegment == 3
         let extensions = segmented.selectedSegment == 2
+        let hasGitHubTask = terminal && githubSnapshot.transaction?.github != nil
         commandField.isHidden = !(terminal || extensions)
         browserButton.isHidden = !terminal
         screenshotButton.isHidden = true
+        githubActions.isHidden = !hasGitHubTask
+        githubActionsHeight?.constant = hasGitHubTask ? 28 : 0
+        githubCancelButton.isHidden = githubSnapshot.metadata?.workflowState != .waitingCI
+            && githubSnapshot.metadata?.workflowState != .ciFailed
+            && githubSnapshot.metadata?.workflowState != .repairingCI
+        githubPRButton.isHidden = githubSnapshot.metadata?.pullRequestURL == nil
         commandField.placeholderString = terminal
             ? "输入命令后按回车运行；或点击浏览器验证"
             : "插件地址，或：mcp add 名称 URL"
@@ -3593,6 +3640,7 @@ final class WorkspacePanelView: LayerView {
 
     private func showTools() {
         summaryLabel.stringValue = "Agent 工具箱"
+        let githubSection = githubToolsSection()
         outputView.string = """
         代码分析        扫描架构、依赖与潜在问题
         性能分析        采集构建与运行时性能
@@ -3603,7 +3651,7 @@ final class WorkspacePanelView: LayerView {
         浏览器验证      启动本地页面，检查截图、Console、Network 与布局
 
         GitHub 自主工程
-        连接状态        正在读取…
+        \(githubSection)
         Autonomous Mode 默认关闭
         远程策略        读取允许；Push / PR 需授权；合并、强推、删分支永久拒绝
 
@@ -3621,6 +3669,55 @@ final class WorkspacePanelView: LayerView {
             self.outputView.string = self.outputView.string.replacingOccurrences(of: "连接状态        正在读取…", with: "连接状态        \(status)")
         }
         scrollToTop()
+    }
+
+    private func githubToolsSection() -> String {
+        guard let transaction = githubSnapshot.transaction,
+              let metadata = transaction.github else {
+            return "连接状态        正在读取…\n任务状态        当前没有 GitHub 任务"
+        }
+        let repository = metadata.githubRepository?.fullName ?? "未绑定"
+        let issue = metadata.issueNumber.map { "#\($0)" } ?? "—"
+        let pullRequest = metadata.pullRequestNumber.map { "#\($0)" } ?? "—"
+        let run = metadata.ciRunId.map { id in
+            metadata.ciRunAttempt.map { "\(id) · attempt \($0)" } ?? id
+        } ?? "等待首次读取"
+        let ci: String
+        switch metadata.ciLastObservedState ?? metadata.ciFinalState {
+        case .queued: ci = "○ 排队中"
+        case .inProgress: ci = "● 运行中"
+        case .passed: ci = "● 已通过"
+        case .failed, .timedOut: ci = "× 未通过"
+        case .cancelled: ci = "○ GitHub CI 已取消"
+        case .neutral, .skipped: ci = "○ 已跳过"
+        case .unknown, .none: ci = "○ 等待状态"
+        }
+        let state: String
+        if githubSnapshot.restoring {
+            state = "正在恢复 GitHub 任务…"
+        } else {
+            switch metadata.workflowState {
+            case .waitingCI: state = "正在等待 CI"
+            case .ciFailed: state = "CI 未通过，可继续修复"
+            case .readyForHumanMerge: state = "等待人工合并"
+            case .cancelled: state = "已停止自动处理（远程 PR 仍然存在）"
+            case .blocked: state = "任务已阻止"
+            case .failed: state = "任务失败"
+            case .interrupted: state = "任务已中断"
+            default: state = metadata.workflowState.rawValue
+            }
+        }
+        let error = githubSnapshot.error.map { "\n恢复提示        \($0)" } ?? ""
+        return """
+        连接状态        正在读取…
+        Repository      \(repository)
+        Issue           \(issue)
+        Branch          \(metadata.taskBranch ?? "—")
+        PR              \(pullRequest)
+        CI              \(ci)
+        Run             \(run)
+        状态            \(state)\(error)
+        """
     }
 
     func showBrowserVerificationStatus(_ text: String) {
@@ -3833,6 +3930,26 @@ final class WorkspacePanelView: LayerView {
 
     @objc private func browserVerificationClicked() {
         onBrowserVerification?()
+    }
+
+    @objc private func cancelGitHubWorkflowClicked() {
+        guard let taskID = githubSnapshot.taskID else { return }
+        let alert = NSAlert()
+        alert.messageText = "停止等待 GitHub CI？"
+        alert.informativeText = "停止 AI Dev One 对此 GitHub 任务的后续自动处理？\n远程 PR、分支和 GitHub CI 不会被删除或取消。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "停止等待")
+        alert.addButton(withTitle: "继续等待")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        onCancelGitHubTask?(taskID)
+    }
+
+    @objc private func viewGitHubPullRequestClicked() {
+        guard let raw = githubSnapshot.metadata?.pullRequestURL,
+              let url = URL(string: raw),
+              url.scheme?.lowercased() == "https",
+              url.host?.lowercased() == "github.com" else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func browserScreenshotClicked() {
@@ -4681,6 +4798,10 @@ final class MainViewController: NSViewController {
     private let split = ResizableSplitView()
     private let runner = NexusRunner()
     private let transactionStore = TaskTransactionStore.shared
+    private lazy var githubWorkflowCoordinator = GitHubWorkflowCoordinator(
+        provider: GitHubCLIProvider(),
+        store: transactionStore
+    )
     private let recovery = CoreRecoveryCoordinator()
     private let browserVerification = BrowserVerificationService.shared
     private var selectedID: UUID?
@@ -4779,7 +4900,21 @@ final class MainViewController: NSViewController {
         workspacePanel.onBrowserVerification = { [weak self] in
             self?.startBrowserVerificationFromWorkspace()
         }
+        workspacePanel.onCancelGitHubTask = { [weak self] taskID in
+            self?.githubWorkflowCoordinator.cancel(taskID: taskID)
+        }
         topBar.onSettings = { [weak self] in self?.openSettings() }
+
+        workspacePanel.updateGitHubWorkflow(GitHubWorkflowSnapshot(
+            transaction: nil,
+            restoring: true,
+            error: nil,
+            activePollerCount: 0
+        ))
+        githubWorkflowCoordinator.onUpdate = { [weak self] snapshot in
+            self?.workspacePanel.updateGitHubWorkflow(snapshot)
+        }
+        githubWorkflowCoordinator.restore()
 
         refreshSidebar()
         if let first = store.sessions.first {
@@ -4869,7 +5004,11 @@ final class MainViewController: NSViewController {
     /// supervisor as intentionally shut down so Process termination cannot
     /// schedule an automatic restart during Cmd+Q/window close.
     func shutdownCore() {
+        // App shutdown stops only the local CI observer. A persisted
+        // waiting_ci transaction remains recoverable and is not user cancel.
+        githubWorkflowCoordinator.stopForAppShutdown()
         if let transaction = activeTransaction,
+           transaction.github?.workflowState != .waitingCI,
            finalization.requestCancel(source: .appShutdown) {
             updateTransaction { current in
                 _ = current.transition(to: .cancelled, cancellationSource: .appShutdown)
@@ -5809,6 +5948,14 @@ final class MainViewController: NSViewController {
         update(&transaction)
         activeTransaction = transaction
         transactionStore.upsert(transaction)
+        // GitHub CI is a long-lived task boundary.  Once the runtime records
+        // a waiting_ci transaction, hand the same persisted object to the
+        // app-level coordinator so polling survives view refreshes and a
+        // subsequent cold start.  Non-GitHub tasks remain on the existing
+        // transaction path.
+        if transaction.github?.workflowState == .waitingCI {
+            githubWorkflowCoordinator.monitor(transaction)
+        }
     }
 
     private func clearActiveTask() {

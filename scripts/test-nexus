@@ -80,6 +80,8 @@ if [[ -x "${project_intelligence_node}" ]]; then
     "${repo_root}/tests/browser-verification-live.cjs"
   check "GitHub Autonomous Provider/Worktree/Policy/CI 契约" "${project_intelligence_node}" \
     "${repo_root}/tests/github-autonomous-unit.cjs"
+  check "GitHub waiting_ci 恢复/取消/持久化契约" "${project_intelligence_node}" \
+    "${repo_root}/tests/github-ci-recovery.cjs"
 else
   printf '提示  未找到 Node，跳过 Project Intelligence CJS 回归\n'
 fi
@@ -157,6 +159,10 @@ check "GitHub CI 分类" grep -q 'enum CIFailureClassifier' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
 check "GitHub 修复轮数上限" grep -q 'maximumRounds' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
+check "GitHub CI 长生命周期恢复" grep -q 'final class GitHubWorkflowCoordinator' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubWorkflowCoordinator.swift"
+check "GitHub waiting_ci 用户取消" grep -q '停止等待 GitHub CI' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
 check "GitHub 禁止自动合并" grep -q 'mergePullRequest' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/GitHubIntegration.swift"
 check "知识库项目智能 UI" grep -q 'renderProjectIntelligence' \
