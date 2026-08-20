@@ -393,7 +393,7 @@ final class TopBarView: LayerView {
         search.layer?.backgroundColor = search.normalColor.cgColor
 
         let bell = iconButton("bell", tooltip: "通知")
-        let spark = iconButton("sparkles", tooltip: "Agent 状态")
+        let spark = iconButton("sparkles", tooltip: "工作监控")
         spark.contentTintColor = Palette.accent
         spark.target = self
         spark.action = #selector(workMonitorClicked)
