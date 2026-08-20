@@ -4817,6 +4817,7 @@ final class ResizableSplitView: NSSplitView, NSSplitViewDelegate {
 
 final class MainViewController: NSViewController {
     var onRequestWindowSize: ((NSSize) -> Void)?
+    var onOpenMainWindow: (() -> Void)?
 
     private let store = SessionStore.shared
     private let topBar = TopBarView()
@@ -5085,6 +5086,9 @@ final class MainViewController: NSViewController {
     private func showWorkMonitor() {
         if workMonitorController == nil {
             workMonitorController = WorkMonitorWindowController()
+        }
+        workMonitorController?.onOpenMainWindow = { [weak self] in
+            self?.onOpenMainWindow?()
         }
         workMonitorController?.show(summary: workSummary)
     }
@@ -6769,6 +6773,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.title = "AI Dev One · Route 2"
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = Palette.forestBottom
+        // Work Monitor 可以在主窗口关闭后重新打开它。保持 NSWindow 对象
+        // 有效，避免 AppKit 默认 releasedWhenClosed 导致 reopen 路径悬空。
+        window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
@@ -6803,6 +6810,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainController = controller
         controller.onRequestWindowSize = { [weak self] size in
             self?.updatePreferredWindowSize(size)
+        }
+        controller.onOpenMainWindow = { [weak self] in
+            self?.showMainWindow()
         }
         if restoredFrame == nil {
             UserDefaults.standard.removeObject(forKey: Self.windowFrameStorageKey)
@@ -6932,6 +6942,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             height: max(size.height, Self.minimumWindowHeight)
         )
         preferredWindowSize = safeSize
+    }
+
+    private func showMainWindow() {
+        guard let window else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
 
     private func saveWindowFrameIfValid() {

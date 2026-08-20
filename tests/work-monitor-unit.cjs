@@ -43,6 +43,9 @@ function assertContains(text, needle, message) {
   'window.level = isPinned ? .floating : .normal',
   'hidesOnDeactivate = false',
   'isReleasedWhenClosed = false',
+  'didBecomeMainNotification',
+  'keepAboveMainWindow',
+  'onOpenMainWindow',
 ].forEach((needle) => assertContains(monitorWindow, needle, `Work Monitor floating-window contract missing: ${needle}`));
 
 [
@@ -50,9 +53,11 @@ function assertContains(text, needle, message) {
   'isWorkMonitorVisible',
   'let windowMenu = NSMenu(title: "窗口")',
   'monitorItem.target = mainController',
+  'showMainWindow()',
 ].forEach((needle) => assertContains(main, needle, `Work Monitor reopen contract missing: ${needle}`));
 
 assertContains(main, '!(mainController?.isWorkMonitorVisible ?? false)', 'Main window close must not terminate while Work Monitor is visible');
+assertContains(main, 'window.isReleasedWhenClosed = false', 'Main window must remain reopenable from Work Monitor');
 
 if (monitorWindow.includes('shutdownCore') || monitorWindow.includes('cancel()')) {
   throw new Error('Closing Work Monitor must not cancel the task or shut down Core');

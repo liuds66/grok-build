@@ -169,6 +169,8 @@ final class WorkMonitorWindowController: NSWindowController {
     private let monitorView: WorkMonitorView
     private var didRestoreFrame = false
     private var isPinned: Bool
+    private var mainWindowObserver: NSObjectProtocol?
+    var onOpenMainWindow: (() -> Void)?
 
     init() {
         monitorView = WorkMonitorView()
@@ -204,11 +206,28 @@ final class WorkMonitorWindowController: NSWindowController {
         monitorView.onPinToggle = { [weak self] pinned in
             self?.setPinned(pinned)
         }
+        monitorView.onOpenMainWindow = { [weak self] in
+            self?.onOpenMainWindow?()
+        }
         monitorView.setPinned(isPinned)
+        mainWindowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeMainNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let mainWindow = notification.object as? NSWindow else { return }
+            self?.keepAboveMainWindow(mainWindow)
+        }
     }
 
     required init?(coder: NSCoder) {
         fatalError("不支持从归档创建")
+    }
+
+    deinit {
+        if let mainWindowObserver {
+            NotificationCenter.default.removeObserver(mainWindowObserver)
+        }
     }
 
     func show(summary: WorkActivitySummary) {
@@ -216,6 +235,9 @@ final class WorkMonitorWindowController: NSWindowController {
         restoreFrameIfNeeded()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+        if let mainWindow = NSApp.windows.first(where: { $0 !== window && $0.title == "AI Dev One · Route 2" }) {
+            keepAboveMainWindow(mainWindow)
+        }
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -231,6 +253,15 @@ final class WorkMonitorWindowController: NSWindowController {
         if pinned {
             window?.orderFrontRegardless()
         }
+    }
+
+    private func keepAboveMainWindow(_ mainWindow: NSWindow) {
+        guard !isPinned,
+              let monitorWindow = window,
+              monitorWindow !== mainWindow,
+              monitorWindow.isVisible,
+              mainWindow.windowNumber != 0 else { return }
+        monitorWindow.order(.above, relativeTo: mainWindow.windowNumber)
     }
 
     private func restoreFrameIfNeeded() {
@@ -275,11 +306,13 @@ final class WorkMonitorView: LayerView {
     private let documentView = LayerView(fillColor: .clear)
     private let bodyStack = NSStackView()
     private let headerStatus = label("● Agent 空闲", size: 11, weight: .medium, color: Palette.secondaryText)
+    private let openMainButton = NSButton(title: "", target: nil, action: nil)
     private let pinButton = NSButton(title: "置顶", target: nil, action: nil)
     private var elapsedLabel: NSTextField?
     private var currentSummary = WorkActivitySummary.idle
     private var timer: Timer?
     var onPinToggle: ((Bool) -> Void)?
+    var onOpenMainWindow: (() -> Void)?
 
     override init(fillColor: NSColor = Palette.canvas, cornerRadius: CGFloat = 0, strokeColor: NSColor? = nil) {
         super.init(fillColor: fillColor, cornerRadius: cornerRadius, strokeColor: strokeColor)
@@ -329,6 +362,15 @@ final class WorkMonitorView: LayerView {
         headerStatus.wantsLayer = true
         headerStatus.layer?.cornerRadius = 11
         headerStatus.layer?.borderWidth = 1
+        openMainButton.translatesAutoresizingMaskIntoConstraints = false
+        openMainButton.bezelStyle = .texturedRounded
+        openMainButton.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: "打开主窗口")
+        openMainButton.imagePosition = .imageOnly
+        openMainButton.toolTip = "打开主窗口"
+        openMainButton.setAccessibilityLabel("打开主窗口")
+        openMainButton.target = self
+        openMainButton.action = #selector(openMainClicked)
+        openMainButton.setContentHuggingPriority(.required, for: .horizontal)
         pinButton.translatesAutoresizingMaskIntoConstraints = false
         pinButton.setButtonType(.toggle)
         pinButton.bezelStyle = .texturedRounded
@@ -341,6 +383,7 @@ final class WorkMonitorView: LayerView {
         header.addSubview(title)
         header.addSubview(subtitle)
         header.addSubview(headerStatus)
+        header.addSubview(openMainButton)
         header.addSubview(pinButton)
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 20),
@@ -350,7 +393,11 @@ final class WorkMonitorView: LayerView {
             pinButton.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -16),
             pinButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             pinButton.heightAnchor.constraint(equalToConstant: 24),
-            headerStatus.trailingAnchor.constraint(equalTo: pinButton.leadingAnchor, constant: -8),
+            openMainButton.trailingAnchor.constraint(equalTo: pinButton.leadingAnchor, constant: -8),
+            openMainButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            openMainButton.widthAnchor.constraint(equalToConstant: 28),
+            openMainButton.heightAnchor.constraint(equalToConstant: 24),
+            headerStatus.trailingAnchor.constraint(equalTo: openMainButton.leadingAnchor, constant: -8),
             headerStatus.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             headerStatus.heightAnchor.constraint(equalToConstant: 24),
             headerStatus.widthAnchor.constraint(greaterThanOrEqualToConstant: 100),
@@ -713,5 +760,9 @@ final class WorkMonitorView: LayerView {
 
     @objc private func pinClicked() {
         onPinToggle?(pinButton.state == .on)
+    }
+
+    @objc private func openMainClicked() {
+        onOpenMainWindow?()
     }
 }
