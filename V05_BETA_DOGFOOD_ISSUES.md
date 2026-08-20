@@ -47,3 +47,12 @@
 | Secret redaction | PASS | 现有脱敏回归扫描通过；未发现凭据形态值 |
 
 本轮未发现已确认的 P0/P1/P2/P3 缺陷。上述检查是本地基线观察，不替代后续真实项目、多任务和网络故障场景；发现问题时按本文规定的闭环处理。
+
+### 2026-08-21 · Dogfood 后回归基线
+
+| 检查 | 结果 | 证据 |
+| --- | --- | --- |
+| `scripts/test-nexus` | PASS | 96 项通过，0 项失败；包含 Swift 类型检查、Project Intelligence、Browser Verification、GitHub 契约、状态/布局/安全静态契约和安装资源检查 |
+| Secret redaction | PASS | 扫描 185 个 runtime JSONL 文件，未发现 credential-shaped values |
+
+回归脚本未传 `--gui`，因此该次脚本运行按设计跳过主动桌面进程检查；桌面安装包的真实启动/退出结果见上方 Idle Soak 记录。
