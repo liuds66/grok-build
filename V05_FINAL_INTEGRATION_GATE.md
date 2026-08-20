@@ -84,7 +84,7 @@ coreStateFinal=ready
 | 项目 | 结果 |
 | --- | --- |
 | Task implementation commit | `91b93896d7469ed9aa53ed03b63ec5e3f476e69c`（包含 RC2/RC3 已验证实现与 Issue #1 实现） |
-| Final PR head | `bb08b146c87cc4bed5785ee8b4d873e488917915`（本报告文档提交） |
+| Final PR head | `098e68bec8ee09bb70c98c23a475e0acb21b7b43`（最终 Gate 报告文档提交） |
 | Push | `PASS`；normal push 到 `origin`，无 `--force` / `--force-with-lease` |
 | PR | [#2 feat: clarify GitHub remote roles in tools panel](https://github.com/liuds66/grok-build/pull/2) |
 | PR state | `OPEN`，`MERGEABLE`，`mergeStateStatus=CLEAN` |
@@ -168,6 +168,6 @@ P3 = 0
 
 `Issue → Project Intelligence → Architect → isolated worktree → Checkpoint → Builder → Local Verification → Core Crash/Recovery → Verifier → Reviewer → Commit → Push → PR → real GitHub CI → App restart recovery → READY_FOR_HUMAN_MERGE`：`PASS`。
 
-实现基线 commit：`91b93896d7469ed9aa53ed03b63ec5e3f476e69c`；最终 PR head：`bb08b146c87cc4bed5785ee8b4d873e488917915`。本报告是集成 Gate 记录，不创建 `v0.5.0-beta.1` tag，不执行 merge，不向 upstream 写入。
+实现基线 commit：`91b93896d7469ed9aa53ed03b63ec5e3f476e69c`；最终 PR head：`098e68bec8ee09bb70c98c23a475e0acb21b7b43`。本报告是集成 Gate 记录，不创建 `v0.5.0-beta.1` tag，不执行 merge，不向 upstream 写入。
 
 建议：允许进入 `v0.5.0-beta.1 FINAL BASELINE FREEZE` 流程；发布打包时再按既有版本机制把用户可见 bundle 版本更新为目标 v0.5 版本，并由用户人工合并 PR #2。
