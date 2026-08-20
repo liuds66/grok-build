@@ -3651,6 +3651,7 @@ final class WorkspacePanelView: LayerView {
         浏览器验证      启动本地页面，检查截图、Console、Network 与布局
 
         GitHub 自主工程
+        \(githubRemoteRoleSummary())
         \(githubSection)
         Autonomous Mode 默认关闭
         远程策略        读取允许；Push / PR 需授权；合并、强推、删分支永久拒绝
@@ -3669,6 +3670,30 @@ final class WorkspacePanelView: LayerView {
             self.outputView.string = self.outputView.string.replacingOccurrences(of: "连接状态        正在读取…", with: "连接状态        \(status)")
         }
         scrollToTop()
+    }
+
+    /// Keep the write target and read-only upstream visible at the point where
+    /// a user reviews GitHub automation.  This is deliberately read-only: it
+    /// never changes remotes and falls back to a neutral message when a project
+    /// is not a Git repository or has not been bound yet.
+    private func githubRemoteRoleSummary() -> String {
+        guard !projectPath.isEmpty else {
+            return "写入目标        origin · 未绑定\n只读上游        upstream · 未绑定"
+        }
+
+        func remoteLabel(_ name: String, fallback: String) -> String {
+            let result = Self.run(executable: "/usr/bin/git", arguments: ["-C", projectPath, "remote", "get-url", name])
+            guard result.code == 0 else { return fallback }
+            let rawURL = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let parsed = GitHubRepositoryBindingResolver.parseGitHubURL(rawURL) {
+                return "\(parsed.owner)/\(parsed.repo)"
+            }
+            return rawURL.isEmpty ? fallback : "已配置"
+        }
+
+        let origin = remoteLabel("origin", fallback: "未配置")
+        let upstream = remoteLabel("upstream", fallback: "未配置")
+        return "写入目标        origin · \(origin)\n只读上游        upstream · \(upstream)"
     }
 
     private func githubToolsSection() -> String {
