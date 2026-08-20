@@ -225,6 +225,12 @@ check "Work Monitor 菜单入口" grep -q 'showWorkMonitorFromMenu' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
 check "Work Monitor 独立生命周期" grep -q 'isWorkMonitorVisible' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
+check "开发版本元数据" grep -q '<string>0.5.0-beta.2-dev</string>' \
+  "${repo_root}/apps/nexus-desktop/Info.plist"
+check "开发构建号" grep -q '<string>2</string>' \
+  "${repo_root}/apps/nexus-desktop/Info.plist"
+check "桌面版本显示" grep -q 'v0.5.0-beta.2-dev' \
+  "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
 check "Composer 120px" grep -q 'heightAnchor.constraint(equalToConstant: 120)' \
   "${repo_root}/apps/nexus-desktop/Sources/NexusDesktop/main.swift"
 check "Workspace 禁止横向滚动" grep -q 'scroll.hasHorizontalScroller = false' \

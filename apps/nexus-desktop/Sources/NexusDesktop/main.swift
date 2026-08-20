@@ -348,7 +348,7 @@ final class TopBarView: LayerView {
         coreLeaf.contentTintColor = Palette.accent
         let coreTitle = label("AI Dev One Core", size: 12.5, weight: .medium)
         coreTitle.translatesAutoresizingMaskIntoConstraints = false
-        let coreVersion = label("v0.5.0-beta.1", size: 11, color: Palette.secondaryText)
+        let coreVersion = label("v0.5.0-beta.2-dev", size: 11, color: Palette.secondaryText)
         coreVersion.translatesAutoresizingMaskIntoConstraints = false
         let localDot = label("● Local Agent", size: 10.5, color: Palette.success)
         localDot.translatesAutoresizingMaskIntoConstraints = false
@@ -471,7 +471,7 @@ final class BottomStatusBarView: LayerView {
     init() {
         super.init(fillColor: Palette.sidebar.withAlphaComponent(0.7), cornerRadius: 0, strokeColor: Palette.border)
         translatesAutoresizingMaskIntoConstraints = false
-        let version = label("◈  AI Dev One Core v0.5.0-beta.1", size: 11, color: Palette.secondaryText)
+        let version = label("◈  AI Dev One Core v0.5.0-beta.2-dev", size: 11, color: Palette.secondaryText)
         let local = capsule("●  本地模式", color: Palette.success)
         let monitor = capsule("⌁  性能监控", color: Palette.accent)
         [restartCoreButton, viewCoreLogButton].forEach { button in
