@@ -4836,6 +4836,10 @@ final class MainViewController: NSViewController {
     private let browserVerification = BrowserVerificationService.shared
     private var workMonitorController: WorkMonitorWindowController?
     private var workSummary = WorkActivitySummary.idle
+    /// UI-only guard: one automatic reveal per task.  The bounded set avoids
+    /// retaining an unbounded history and never replaces TaskTransaction.
+    private var autoOpenedWorkMonitorTaskIDs: Set<String> = []
+    private var manuallyClosedWorkMonitorTaskIDs: Set<String> = []
     private var selectedID: UUID?
     private var streamingText = ""
     private var settingsController: SettingsWindowController?
@@ -4957,6 +4961,9 @@ final class MainViewController: NSViewController {
             newTask()
         }
         workspacePanel.refresh()
+        DispatchQueue.main.async { [weak self] in
+            self?.restoreActiveWorkMonitorIfNeeded()
+        }
     }
 
     override func viewDidAppear() {
@@ -5090,7 +5097,48 @@ final class MainViewController: NSViewController {
         workMonitorController?.onOpenMainWindow = { [weak self] in
             self?.onOpenMainWindow?()
         }
+        workMonitorController?.onManualClose = { [weak self] in
+            guard let self, !self.workSummary.taskID.isEmpty else { return }
+            self.manuallyClosedWorkMonitorTaskIDs.insert(self.workSummary.taskID)
+            self.trimWorkMonitorTaskGuards()
+        }
         workMonitorController?.show(summary: workSummary)
+    }
+
+    /// Opens the singleton monitor exactly once for a real task execution.
+    /// This is deliberately separate from the business task state machine:
+    /// it only remembers presentation intent and respects a user's close.
+    private func autoOpenWorkMonitor(for transaction: TaskTransaction, restored: Bool = false) {
+        guard WorkMonitorWindowController.autoOpenOnTaskStart,
+              !autoOpenedWorkMonitorTaskIDs.contains(transaction.taskId),
+              !manuallyClosedWorkMonitorTaskIDs.contains(transaction.taskId) else { return }
+        autoOpenedWorkMonitorTaskIDs.insert(transaction.taskId)
+        trimWorkMonitorTaskGuards()
+        if workMonitorController == nil {
+            workMonitorController = WorkMonitorWindowController()
+        }
+        workMonitorController?.onOpenMainWindow = { [weak self] in
+            self?.onOpenMainWindow?()
+        }
+        workMonitorController?.onManualClose = { [weak self] in
+            guard let self, !self.workSummary.taskID.isEmpty else { return }
+            self.manuallyClosedWorkMonitorTaskIDs.insert(self.workSummary.taskID)
+            self.trimWorkMonitorTaskGuards()
+        }
+        // A restored task is still an automatic reveal; keeping the same path
+        // prevents a cold start from creating a second panel or stealing focus.
+        workMonitorController?.show(summary: workSummary, autoOpened: true)
+        _ = restored
+    }
+
+    private func trimWorkMonitorTaskGuards() {
+        let limit = 128
+        if autoOpenedWorkMonitorTaskIDs.count > limit {
+            autoOpenedWorkMonitorTaskIDs = Set(autoOpenedWorkMonitorTaskIDs.suffix(limit))
+        }
+        if manuallyClosedWorkMonitorTaskIDs.count > limit {
+            manuallyClosedWorkMonitorTaskIDs = Set(manuallyClosedWorkMonitorTaskIDs.suffix(limit))
+        }
     }
 
     /// Window 菜单和顶部按钮共用同一个单例入口，避免重复创建监控面板。
@@ -5115,6 +5163,15 @@ final class MainViewController: NSViewController {
         let projectURL = URL(fileURLWithPath: session.projectPath)
         let projectName = projectURL.lastPathComponent.isEmpty ? "未选择项目" : projectURL.lastPathComponent
         workSummary = .idle
+        let latestTransaction = transactionStore.allTransactions().first {
+            $0.sessionId == session.id.uuidString.lowercased()
+        }
+        if let latestTransaction {
+            workSummary.taskID = latestTransaction.taskId
+            workSummary.elapsedSince = latestTransaction.startedAt
+            workSummary.timeline = WorkActivityTimelineBuilder.rebuild(from: latestTransaction)
+            workSummary.currentEventID = workSummary.timeline.last(where: { $0.state == .active })?.id
+        }
         workSummary.taskTitle = session.title == "新任务" ? "等待新的开发任务" : WorkMonitorRedaction.text(session.title, limit: 180)
         workSummary.projectName = projectName
         workSummary.projectPath = session.projectPath
@@ -5129,11 +5186,125 @@ final class MainViewController: NSViewController {
         publishWorkMonitor()
     }
 
+    private func restoreActiveWorkMonitorIfNeeded() {
+        guard let session = selectedSession,
+              let transaction = transactionStore.allTransactions().first(where: {
+                  $0.sessionId == session.id.uuidString.lowercased()
+              }),
+              !transaction.finalState.isTerminal else { return }
+        workSummary.taskID = transaction.taskId
+        workSummary.elapsedSince = transaction.startedAt
+        workSummary.timeline = WorkActivityTimelineBuilder.rebuild(from: transaction)
+        workSummary.currentEventID = workSummary.timeline.last(where: { $0.state == .active })?.id
+        workSummary.status = "正在恢复"
+        workSummary.currentStage = transaction.pipeline.states.first(where: { $0.value == .active })?.key.rawValue ?? "—"
+        workSummary.activity = transaction.github?.workflowState == .waitingCI ? "等待 GitHub CI" : "恢复已保存的任务活动"
+        workSummary.actionType = transaction.github?.workflowState == .waitingCI ? "等待" : "恢复"
+        workSummary.target = transaction.github?.workflowState == .waitingCI ? "GitHub CI" : "任务执行"
+        publishWorkMonitor()
+        autoOpenWorkMonitor(for: transaction, restored: true)
+    }
+
     private func updateWorkMonitorRuntime(core: String? = nil, model: String? = nil, agent: String? = nil) {
-        if let core { workSummary.coreStatus = WorkMonitorRedaction.text(core, limit: 60) }
+        if let core {
+            workSummary.coreStatus = WorkMonitorRedaction.text(core, limit: 60)
+            let lowered = core.lowercased()
+            let state: WorkMonitorItemState = lowered.contains("failed") || lowered.contains("断开") ? .failed : lowered.contains("restart") || lowered.contains("starting") ? .active : .success
+            appendWorkTimeline(
+                id: "core-\(lowered)",
+                category: .core,
+                state: state,
+                title: lowered.contains("disconnect") || lowered.contains("断开") ? "Core 已断开" : lowered.contains("restart") || lowered.contains("starting") ? "Core 正在恢复" : "Core 已连接",
+                summary: state == .failed ? "等待 Core 恢复" : state == .active ? "正在重新连接本地运行时" : "本地运行时状态已更新"
+            )
+        }
         if let model { workSummary.modelStatus = WorkMonitorRedaction.text(model, limit: 60) }
         if let agent { workSummary.agentStatus = WorkMonitorRedaction.text(agent, limit: 60) }
         publishWorkMonitor()
+    }
+
+    private func timelineState(for status: String?) -> WorkMonitorItemState {
+        let lowered = (status ?? "正在工作").lowercased()
+        if lowered.contains("失败") || lowered.contains("fail") || lowered.contains("错误") { return .failed }
+        if lowered.contains("完成") || lowered.contains("pass") || lowered.contains("ready") || lowered.contains("就绪") { return .success }
+        if lowered.contains("取消") || lowered.contains("中断") { return .warning }
+        if lowered.contains("等待") || lowered.contains("配置") { return .pending }
+        return .active
+    }
+
+    private func timelineCategory(for action: String) -> WorkActivityCategory {
+        switch action {
+        case "验证", "构建": return .verification
+        case "浏览器验证": return .browser
+        case "GitHub": return .github
+        case "读取", "修改", "创建", "删除": return .file
+        case "搜索": return .search
+        case "运行": return .command
+        case "恢复": return .core
+        case "等待": return .wait
+        default: return .activity
+        }
+    }
+
+    private func appendWorkTimeline(
+        id: String? = nil,
+        category: WorkActivityCategory,
+        state: WorkMonitorItemState,
+        title: String,
+        summary: String,
+        target: String? = nil,
+        duration: TimeInterval? = nil,
+        makeCurrent: Bool = false
+    ) {
+        guard !workSummary.taskID.isEmpty else { return }
+        let safeTitle = WorkMonitorRedaction.text(title, limit: 180)
+        let safeSummary = WorkMonitorRedaction.text(summary, limit: 240)
+        let safeTarget = target.map { WorkMonitorRedaction.text($0, limit: 180) }
+        let eventID = id ?? "event-\(UUID().uuidString.lowercased())"
+        if let index = workSummary.timeline.firstIndex(where: { $0.id == eventID }) {
+            var event = workSummary.timeline[index]
+            event.state = state
+            event.title = safeTitle
+            event.summary = safeSummary
+            event.target = safeTarget
+            if let duration { event.duration = duration }
+            if state != .active, event.duration == nil {
+                event.duration = max(0, Date().timeIntervalSince(event.timestamp))
+            }
+            workSummary.timeline[index] = event
+        } else {
+            workSummary.timeline.append(WorkActivityEvent(
+                id: eventID,
+                timestamp: Date(),
+                category: category,
+                state: state,
+                title: safeTitle,
+                summary: safeSummary,
+                target: safeTarget,
+                duration: duration
+            ))
+        }
+        if makeCurrent {
+            workSummary.currentEventID = eventID
+            moveCurrentTimelineToEnd()
+        }
+        let overflow = max(0, workSummary.timeline.count - WorkActivityTimelineBuilder.maximumEvents)
+        if overflow > 0 {
+            workSummary.timeline.removeFirst(overflow)
+            workSummary.timelineTruncatedCount += overflow
+            if let current = workSummary.currentEventID,
+               !workSummary.timeline.contains(where: { $0.id == current }) {
+                workSummary.currentEventID = workSummary.timeline.last?.id
+            }
+        }
+    }
+
+    private func moveCurrentTimelineToEnd() {
+        guard let currentID = workSummary.currentEventID,
+              let index = workSummary.timeline.firstIndex(where: { $0.id == currentID }),
+              index != workSummary.timeline.index(before: workSummary.timeline.endIndex) else { return }
+        let event = workSummary.timeline.remove(at: index)
+        workSummary.timeline.append(event)
     }
 
     private func setWorkCurrent(
@@ -5152,6 +5323,15 @@ final class MainViewController: NSViewController {
         workSummary.activity = WorkMonitorRedaction.text(activity, limit: 300)
         if let stage { workSummary.currentStage = stage }
         if let status { workSummary.status = status }
+        appendWorkTimeline(
+            id: workSummary.taskID.isEmpty ? nil : "current-\(workSummary.taskID)",
+            category: timelineCategory(for: action),
+            state: timelineState(for: status),
+            title: action == "等待" ? "等待下一步" : action,
+            summary: activity,
+            target: targetPath ?? target,
+            makeCurrent: true
+        )
         publishWorkMonitor()
     }
 
@@ -5172,6 +5352,13 @@ final class MainViewController: NSViewController {
             at: 0
         )
         workSummary.recentActivities = Array(workSummary.recentActivities.prefix(5))
+        appendWorkTimeline(
+            category: .activity,
+            state: state,
+            title: safeTitle,
+            summary: detail ?? safeTitle
+        )
+        moveCurrentTimelineToEnd()
         publishWorkMonitor()
     }
 
@@ -5198,6 +5385,15 @@ final class MainViewController: NSViewController {
             activity: activity,
             stage: stage,
             status: failed ? "任务失败" : "正在工作"
+        )
+        appendWorkTimeline(
+            id: "tool-\(WorkMonitorRedaction.text(title, limit: 100))-\(targetInfo.target)",
+            category: timelineCategory(for: action),
+            state: failed ? .failed : running ? .active : .success,
+            title: running ? "\(action)进行中" : failed ? "\(action)未完成" : "\(action)完成",
+            summary: activity,
+            target: targetInfo.path ?? targetInfo.target,
+            makeCurrent: true
         )
         if let path = targetInfo.path,
            ["修改", "创建", "删除"].contains(action) {
@@ -5291,6 +5487,16 @@ final class MainViewController: NSViewController {
                 return WorkStageDisplay(name: stage.rawValue, state: .pending, detail: "等待")
             }
         }
+        for stage in workSummary.stages {
+            appendWorkTimeline(
+                id: "stage-\(stage.name)",
+                category: .agent,
+                state: stage.state,
+                title: stage.name,
+                summary: stage.detail,
+                makeCurrent: false
+            )
+        }
         if let active = workSummary.stages.first(where: { $0.state == .active }) {
             workSummary.currentStage = active.name
         }
@@ -5311,6 +5517,17 @@ final class MainViewController: NSViewController {
                 state: state,
                 statusText: status,
                 detail: check.reason.map { WorkMonitorRedaction.text($0, limit: 120) }
+            )
+        }
+        for check in report.checks {
+            let state: WorkMonitorItemState = check.status == .pass ? .success : check.status == .fail ? .failed : .pending
+            appendWorkTimeline(
+                id: "verification-\(check.name)",
+                category: .verification,
+                state: state,
+                title: WorkMonitorRedaction.text(check.name, limit: 120),
+                summary: check.status.rawValue + (check.reason.map { " · \($0)" } ?? ""),
+                duration: check.duration > 0 ? check.duration : nil
             )
         }
         if !workSummary.verificationItems.contains(where: { $0.name == "Reviewer" }) {
@@ -5811,6 +6028,7 @@ final class MainViewController: NSViewController {
         activeToolFailure = nil
         recovery.reset()
         workSummary = .idle
+        workSummary.taskID = transaction.taskId
         workSummary.taskTitle = WorkMonitorRedaction.text(session.title, limit: 180)
         workSummary.projectName = URL(fileURLWithPath: session.projectPath).lastPathComponent
         workSummary.projectPath = session.projectPath
@@ -5822,10 +6040,33 @@ final class MainViewController: NSViewController {
         workSummary.purpose = "理解项目结构，规划安全且可验证的执行步骤。"
         workSummary.activity = "正在读取任务所需的项目上下文"
         workSummary.agentStatus = "Agent 正在工作"
+        appendWorkTimeline(
+            id: "task-start",
+            category: .task,
+            state: .success,
+            title: "任务开始",
+            summary: "已创建工作上下文"
+        )
+        appendWorkTimeline(
+            id: "checkpoint",
+            category: .checkpoint,
+            state: .success,
+            title: "Checkpoint",
+            summary: "已创建可回滚快照"
+        )
+        appendWorkTimeline(
+            id: "project-context",
+            category: .project,
+            state: .active,
+            title: "Project Intelligence",
+            summary: "正在加载任务相关的项目上下文",
+            makeCurrent: true
+        )
         updateWorkStages()
         updateWorkVerificationPlan(projectPath: session.projectPath)
         addWorkRecent("已创建任务 checkpoint", state: .success, detail: "准备开始")
         publishWorkMonitor()
+        autoOpenWorkMonitor(for: transaction)
         chat.composer.setRunning(true)
         chat.setStatus("● Planning", color: Palette.accent)
         bottomBar.setAgentStatus("Planning", color: Palette.accent)
@@ -6203,7 +6444,7 @@ final class MainViewController: NSViewController {
                 stage: "Verifier",
                 status: report.hasFailure ? "验证失败" : "正在验证"
             )
-            self.addWorkRecent(report.hasFailure ? "项目验证未通过" : "项目验证已完成", state: report.hasFailure ? .failed : .success, detail: "(report.checks.filter { $0.status == .pass }.count) 项通过")
+            self.addWorkRecent(report.hasFailure ? "项目验证未通过" : "项目验证已完成", state: report.hasFailure ? .failed : .success, detail: "\(report.checks.filter { $0.status == .pass }.count) 项通过")
             if report.hasFailure {
                 _ = self.pipeline.fail(.verifier)
                 self.updateTransaction { current in
@@ -6546,6 +6787,14 @@ final class MainViewController: NSViewController {
         workSummary.activity = status == "已完成" ? "任务已完成，验证通过" : status
         workSummary.purpose = status == "已完成" ? "保留真实验证结果，便于从 Work Monitor 快速复盘。" : "等待下一步操作。"
         workSummary.agentStatus = status == "已完成" ? "Agent 完成" : status
+        appendWorkTimeline(
+            id: "task-result-\(workSummary.taskID)",
+            category: status == "已完成" ? .task : .error,
+            state: status == "已完成" ? .success : .warning,
+            title: status == "已完成" ? "任务完成" : status,
+            summary: status == "已完成" ? "Verifier 与 Reviewer 已通过" : status,
+            makeCurrent: true
+        )
         updateWorkStages()
         addWorkRecent(status == "已完成" ? "任务已完成" : status, state: status == "已完成" ? .success : .warning)
         chat.finishStreaming()
@@ -6641,6 +6890,15 @@ final class MainViewController: NSViewController {
             stage: workSummary.currentStage,
             status: "正在停止"
         )
+        appendWorkTimeline(
+            id: "task-cancel-\(activeTransaction?.taskId ?? workSummary.taskID)",
+            category: .task,
+            state: .warning,
+            title: "用户停止任务",
+            summary: "任务已取消，后续 Agent 阶段不会继续执行。",
+            makeCurrent: true
+        )
+        addWorkRecent("任务已取消", state: .warning)
         browserVerification.cancel()
         finishFailure("任务已停止。", session: session, messageID: messageID)
         activeTransaction = nil

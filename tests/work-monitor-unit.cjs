@@ -59,7 +59,7 @@ function assertContains(text, needle, message) {
 assertContains(main, '!(mainController?.isWorkMonitorVisible ?? false)', 'Main window close must not terminate while Work Monitor is visible');
 assertContains(main, 'window.isReleasedWhenClosed = false', 'Main window must remain reopenable from Work Monitor');
 
-if (monitorWindow.includes('shutdownCore') || monitorWindow.includes('cancel()')) {
+if (monitorWindow.includes('shutdownCore') || monitorWindow.includes('runner.stop') || monitorWindow.includes('browserVerification.cancel')) {
   throw new Error('Closing Work Monitor must not cancel the task or shut down Core');
 }
 

@@ -26,6 +26,37 @@ enum WorkMonitorItemState: String {
     case failed
 }
 
+/// Presentation-only activity categories.  The authoritative task state
+/// remains TaskTransaction/Agent/Core; these values only describe observable
+/// work in a human-readable form for the floating monitor.
+enum WorkActivityCategory: String {
+    case task = "任务"
+    case project = "项目"
+    case agent = "Agent"
+    case file = "文件"
+    case search = "搜索"
+    case command = "命令"
+    case browser = "浏览器"
+    case github = "GitHub"
+    case core = "Core"
+    case checkpoint = "Checkpoint"
+    case wait = "等待"
+    case error = "错误"
+    case verification = "验证"
+    case activity = "活动"
+}
+
+struct WorkActivityEvent {
+    let id: String
+    var timestamp: Date
+    var category: WorkActivityCategory
+    var state: WorkMonitorItemState
+    var title: String
+    var summary: String
+    var target: String?
+    var duration: TimeInterval?
+}
+
 struct WorkStageDisplay {
     let name: String
     let state: WorkMonitorItemState
@@ -61,6 +92,7 @@ struct WorkGitHubSummary {
 }
 
 struct WorkActivitySummary {
+    var taskID: String
     var taskTitle: String
     var projectName: String
     var projectPath: String
@@ -80,9 +112,13 @@ struct WorkActivitySummary {
     var modelStatus: String
     var agentStatus: String
     var github: WorkGitHubSummary?
+    var currentEventID: String?
+    var timeline: [WorkActivityEvent]
+    var timelineTruncatedCount: Int
 
     static var idle: WorkActivitySummary {
         WorkActivitySummary(
+            taskID: "",
             taskTitle: "等待新的开发任务",
             projectName: "未选择项目",
             projectPath: "",
@@ -101,7 +137,10 @@ struct WorkActivitySummary {
             coreStatus: "Ready",
             modelStatus: "模型就绪",
             agentStatus: "Agent 空闲",
-            github: nil
+            github: nil,
+            currentEventID: nil,
+            timeline: [],
+            timelineTruncatedCount: 0
         )
     }
 
@@ -142,6 +181,7 @@ enum WorkMonitorRedaction {
             (#"(?i)(bearer\s+)[A-Za-z0-9._~+\-/=]+"#, "$1<redacted-key>"),
             (#"(?i)(api[_-]?key\s*[=:]\s*)[^\s,&]+"#, "$1<redacted-key>"),
             (#"(?i)(authorization\s*[=:]\s*)[^\s,&]+"#, "$1<redacted>"),
+            (#"(?i)(?:/Users/|/Volumes/|/private/tmp/|/tmp/)[^\s,&]+"#, "<project-path>"),
         ]
         for (pattern, replacement) in patterns {
             guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
@@ -161,20 +201,160 @@ enum WorkMonitorRedaction {
     }
 }
 
+/// Rebuilds a useful presentation timeline from the existing transaction
+/// audit fields after a cold start.  It deliberately does not introduce a
+/// second event database or expose raw tool arguments.
+enum WorkActivityTimelineBuilder {
+    static let maximumEvents = 200
+
+    static func rebuild(from transaction: TaskTransaction) -> [WorkActivityEvent] {
+        var events: [WorkActivityEvent] = []
+        var cursor = transaction.startedAt
+
+        append(
+            &events,
+            id: "task-start",
+            at: cursor,
+            category: .task,
+            state: .success,
+            title: "任务开始",
+            summary: "已创建工作上下文"
+        )
+        if transaction.checkpointId != nil {
+            cursor = cursor.addingTimeInterval(1)
+            append(
+                &events,
+                id: "checkpoint",
+                at: cursor,
+                category: .checkpoint,
+                state: .success,
+                title: "Checkpoint",
+                summary: "已创建可回滚快照"
+            )
+        }
+
+        let stageEntries = Array(transaction.agentStages.suffix(maximumEvents / 2))
+        for (index, stage) in stageEntries.enumerated() {
+            cursor = cursor.addingTimeInterval(1)
+            let parts = stage.split(separator: ":", maxSplits: 1).map(String.init)
+            let name = WorkMonitorRedaction.text(parts.first ?? "Agent", limit: 80)
+            let detail = WorkMonitorRedaction.text(parts.count > 1 ? parts[1] : stage, limit: 220)
+            let lowered = detail.lowercased()
+            let state: WorkMonitorItemState
+            if lowered.contains("fail") || lowered.contains("失败") {
+                state = .failed
+            } else if lowered.contains("pass") || lowered.contains("complete") || lowered.contains("完成") {
+                state = .success
+            } else {
+                state = index == stageEntries.count - 1 && !transaction.finalState.isTerminal ? .active : .success
+            }
+            append(
+                &events,
+                id: "stage-\(index)-\(name)",
+                at: cursor,
+                category: .agent,
+                state: state,
+                title: name,
+                summary: detail
+            )
+        }
+
+        for (index, call) in transaction.toolCalls.suffix(maximumEvents / 2).enumerated() {
+            cursor = cursor.addingTimeInterval(1)
+            let safe = WorkMonitorRedaction.text(call, limit: 260)
+            let parts = safe.split(separator: ":", maxSplits: 1).map(String.init)
+            let title = WorkMonitorRedaction.text(parts.first ?? "工具操作", limit: 120)
+            let summary = WorkMonitorRedaction.text(parts.count > 1 ? parts[1] : safe, limit: 220)
+            let category: WorkActivityCategory = title.lowercased().contains("browser") ? .browser : .command
+            append(
+                &events,
+                id: "tool-\(index)-\(title)",
+                at: cursor,
+                category: category,
+                state: summary.lowercased().contains("fail") ? .failed : .success,
+                title: title,
+                summary: summary
+            )
+        }
+
+        for (index, check) in transaction.verification.suffix(40).enumerated() {
+            cursor = cursor.addingTimeInterval(1)
+            let state: WorkMonitorItemState = check.status == .pass ? .success : check.status == .fail ? .failed : .pending
+            append(
+                &events,
+                id: "verification-\(index)-\(check.name)",
+                at: cursor,
+                category: .verification,
+                state: state,
+                title: WorkMonitorRedaction.text(check.name, limit: 120),
+                summary: check.status.rawValue + (check.reason.map { " · \(WorkMonitorRedaction.text($0, limit: 140))" } ?? ""),
+                duration: check.duration > 0 ? check.duration : nil
+            )
+        }
+
+        if transaction.finalState.isTerminal {
+            cursor = cursor.addingTimeInterval(1)
+            let state: WorkMonitorItemState = transaction.finalState == .completed ? .success : transaction.finalState == .cancelled ? .warning : .failed
+            append(
+                &events,
+                id: "task-final-\(transaction.finalState.rawValue)",
+                at: cursor,
+                category: transaction.finalState == .completed ? .task : .error,
+                state: state,
+                title: transaction.finalState == .completed ? "任务完成" : "任务\(transaction.finalState == .cancelled ? "已取消" : "已结束")",
+                summary: transaction.finalState == .completed ? "Verifier 与 Reviewer 已通过" : "最终状态：\(transaction.finalState.rawValue)"
+            )
+        }
+        return Array(events.suffix(maximumEvents))
+    }
+
+    private static func append(
+        _ events: inout [WorkActivityEvent],
+        id: String,
+        at timestamp: Date,
+        category: WorkActivityCategory,
+        state: WorkMonitorItemState,
+        title: String,
+        summary: String,
+        target: String? = nil,
+        duration: TimeInterval? = nil
+    ) {
+        events.append(WorkActivityEvent(
+            id: id,
+            timestamp: timestamp,
+            category: category,
+            state: state,
+            title: WorkMonitorRedaction.text(title, limit: 180),
+            summary: WorkMonitorRedaction.text(summary, limit: 240),
+            target: target.map { WorkMonitorRedaction.text($0, limit: 180) },
+            duration: duration
+        ))
+    }
+}
+
 // MARK: - Work Monitor Window
 
-final class WorkMonitorWindowController: NSWindowController {
+final class WorkMonitorWindowController: NSWindowController, NSWindowDelegate {
     private static let frameAutosaveName = NSWindow.FrameAutosaveName("AI Dev One.WorkMonitor")
     private static let alwaysOnTopKey = "ai-dev-one.work-monitor.always-on-top"
+    static let autoOpenOnTaskStartKey = "workMonitorAutoOpenOnTaskStart"
     private let monitorView: WorkMonitorView
     private var didRestoreFrame = false
     private var isPinned: Bool
     private var mainWindowObserver: NSObjectProtocol?
+    private var pendingSummary: WorkActivitySummary?
+    private var pendingUpdate: DispatchWorkItem?
     var onOpenMainWindow: (() -> Void)?
+    var onManualClose: (() -> Void)?
+
+    static var autoOpenOnTaskStart: Bool {
+        UserDefaults.standard.object(forKey: autoOpenOnTaskStartKey) as? Bool ?? true
+    }
 
     init() {
         monitorView = WorkMonitorView()
         isPinned = UserDefaults.standard.bool(forKey: Self.alwaysOnTopKey)
+        UserDefaults.standard.register(defaults: [Self.autoOpenOnTaskStartKey: true])
         let window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 620),
             styleMask: [.titled, .closable, .resizable, .utilityWindow],
@@ -203,13 +383,18 @@ final class WorkMonitorWindowController: NSWindowController {
         monitorView.autoresizingMask = [.width, .height]
         window.contentView = monitorView
         super.init(window: window)
+        window.delegate = self
         monitorView.onPinToggle = { [weak self] pinned in
             self?.setPinned(pinned)
+        }
+        monitorView.onAutoOpenToggle = { enabled in
+            UserDefaults.standard.set(enabled, forKey: Self.autoOpenOnTaskStartKey)
         }
         monitorView.onOpenMainWindow = { [weak self] in
             self?.onOpenMainWindow?()
         }
         monitorView.setPinned(isPinned)
+        monitorView.setAutoOpen(Self.autoOpenOnTaskStart)
         mainWindowObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeMainNotification,
             object: nil,
@@ -225,24 +410,51 @@ final class WorkMonitorWindowController: NSWindowController {
     }
 
     deinit {
+        pendingUpdate?.cancel()
         if let mainWindowObserver {
             NotificationCenter.default.removeObserver(mainWindowObserver)
         }
     }
 
-    func show(summary: WorkActivitySummary) {
+    func show(summary: WorkActivitySummary, autoOpened: Bool = false) {
+        pendingUpdate?.cancel()
+        pendingUpdate = nil
+        pendingSummary = nil
         monitorView.update(summary: summary)
         restoreFrameIfNeeded()
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
+        if autoOpened {
+            // Auto-open must be visible without stealing the Composer or a
+            // terminal's keyboard focus.  The panel becomes key only when
+            // the user explicitly clicks it or chooses Window → 工作监控.
+            window?.orderFrontRegardless()
+        } else {
+            showWindow(nil)
+            window?.makeKeyAndOrderFront(nil)
+        }
         if let mainWindow = NSApp.windows.first(where: { $0 !== window && $0.title == "AI Dev One · Route 2" }) {
             keepAboveMainWindow(mainWindow)
         }
-        NSApp.activate(ignoringOtherApps: true)
+        if !autoOpened {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func update(summary: WorkActivitySummary) {
-        monitorView.update(summary: summary)
+        pendingSummary = summary
+        guard pendingUpdate == nil else { return }
+        let update = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingUpdate = nil
+            guard let pending = self.pendingSummary else { return }
+            self.pendingSummary = nil
+            self.monitorView.update(summary: pending)
+        }
+        pendingUpdate = update
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: update)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onManualClose?()
     }
 
     private func setPinned(_ pinned: Bool) {
@@ -308,10 +520,16 @@ final class WorkMonitorView: LayerView {
     private let headerStatus = label("● Agent 空闲", size: 11, weight: .medium, color: Palette.secondaryText)
     private let openMainButton = NSButton(title: "", target: nil, action: nil)
     private let pinButton = NSButton(title: "置顶", target: nil, action: nil)
+    private let autoOpenButton = NSButton(checkboxWithTitle: "任务开始时自动显示", target: nil, action: nil)
+    private let latestButton = NSButton(title: "↓ 回到最新", target: nil, action: nil)
     private var elapsedLabel: NSTextField?
     private var currentSummary = WorkActivitySummary.idle
     private var timer: Timer?
+    private var scrollObserver: NSObjectProtocol?
+    private var isProgrammaticScroll = false
+    private var followsLatest = true
     var onPinToggle: ((Bool) -> Void)?
+    var onAutoOpenToggle: ((Bool) -> Void)?
     var onOpenMainWindow: (() -> Void)?
 
     override init(fillColor: NSColor = Palette.canvas, cornerRadius: CGFloat = 0, strokeColor: NSColor? = nil) {
@@ -333,6 +551,9 @@ final class WorkMonitorView: LayerView {
 
     deinit {
         timer?.invalidate()
+        if let scrollObserver {
+            NotificationCenter.default.removeObserver(scrollObserver)
+        }
     }
 
     func update(summary: WorkActivitySummary) {
@@ -380,16 +601,34 @@ final class WorkMonitorView: LayerView {
         pinButton.target = self
         pinButton.action = #selector(pinClicked)
         pinButton.setContentHuggingPriority(.required, for: .horizontal)
+        autoOpenButton.translatesAutoresizingMaskIntoConstraints = false
+        autoOpenButton.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
+        autoOpenButton.contentTintColor = Palette.secondaryText
+        autoOpenButton.target = self
+        autoOpenButton.action = #selector(autoOpenClicked)
+        autoOpenButton.toolTip = "新任务开始时自动显示工作监控"
+
+        latestButton.translatesAutoresizingMaskIntoConstraints = false
+        latestButton.bezelStyle = .texturedRounded
+        latestButton.font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+        latestButton.target = self
+        latestButton.action = #selector(scrollToLatestClicked)
+        latestButton.isHidden = true
+        latestButton.setAccessibilityLabel("回到最新活动")
         header.addSubview(title)
         header.addSubview(subtitle)
         header.addSubview(headerStatus)
         header.addSubview(openMainButton)
         header.addSubview(pinButton)
+        header.addSubview(autoOpenButton)
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 20),
             title.topAnchor.constraint(equalTo: header.topAnchor, constant: 13),
             subtitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 3),
+            autoOpenButton.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            autoOpenButton.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 5),
+            autoOpenButton.heightAnchor.constraint(equalToConstant: 18),
             pinButton.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -16),
             pinButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             pinButton.heightAnchor.constraint(equalToConstant: 24),
@@ -420,15 +659,19 @@ final class WorkMonitorView: LayerView {
 
         addSubview(header)
         addSubview(scrollView)
+        addSubview(latestButton)
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: leadingAnchor),
             header.trailingAnchor.constraint(equalTo: trailingAnchor),
             header.topAnchor.constraint(equalTo: topAnchor),
-            header.heightAnchor.constraint(equalToConstant: 68),
+            header.heightAnchor.constraint(equalToConstant: 88),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+            latestButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
+            latestButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -24),
+            latestButton.heightAnchor.constraint(equalToConstant: 24),
             bodyStack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 4),
             bodyStack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -4),
             bodyStack.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 4),
@@ -436,6 +679,14 @@ final class WorkMonitorView: LayerView {
             documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor, constant: -8),
             documentView.heightAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.heightAnchor),
         ])
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateFollowLatestState()
+        }
     }
 
     private func render() {
@@ -455,6 +706,7 @@ final class WorkMonitorView: LayerView {
         bodyStack.addArrangedSubview(makeTaskCard())
         bodyStack.addArrangedSubview(makePipelineCard())
         bodyStack.addArrangedSubview(makeCurrentWorkCard())
+        bodyStack.addArrangedSubview(makeTimelineCard())
         bodyStack.addArrangedSubview(makeRecentWorkCard())
         bodyStack.addArrangedSubview(makeVerificationCard())
         if !currentSummary.files.isEmpty {
@@ -467,6 +719,9 @@ final class WorkMonitorView: LayerView {
         documentView.needsLayout = true
         documentView.layoutSubtreeIfNeeded()
         refreshElapsed()
+        DispatchQueue.main.async { [weak self] in
+            self?.scrollToLatestIfNeeded()
+        }
     }
 
     private func makeTaskCard() -> NSView {
@@ -529,6 +784,59 @@ final class WorkMonitorView: LayerView {
         rows.append(keyValueRow("当前操作", currentSummary.activity, color: NSColor(calibratedWhite: 0.92, alpha: 0.95)))
         let stack = verticalStack(rows, spacing: 8)
         return sectionCard("现在正在做", stack, accent: Palette.accent, emphasized: true)
+    }
+
+    private func makeTimelineCard() -> NSView {
+        var rows: [NSView] = []
+        if currentSummary.timelineTruncatedCount > 0 {
+            rows.append(label(
+                "更早的 \(currentSummary.timelineTruncatedCount) 条活动已折叠",
+                size: 10.5,
+                color: Palette.secondaryText
+            ))
+        }
+        let events = Array(currentSummary.timeline.suffix(WorkActivityTimelineBuilder.maximumEvents))
+        if events.isEmpty {
+            rows.append(label("任务开始后，这里会显示可观察的执行活动。", size: 11.5, color: Palette.secondaryText))
+        } else {
+            rows.append(contentsOf: events.map { makeTimelineRow($0) })
+        }
+        return sectionCard("工作时间线", verticalStack(rows, spacing: 8), accent: Palette.violet)
+    }
+
+    private func makeTimelineRow(_ event: WorkActivityEvent) -> NSView {
+        let timestamp = DateFormatter.workMonitorTime.string(from: event.timestamp)
+        let time = label(timestamp, size: 10, color: Palette.secondaryText)
+        time.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        time.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let marker = label(statusSymbol(event.state), size: 12, weight: .bold, color: statusColor(event.state))
+        marker.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        marker.alignment = .center
+
+        let title = label(WorkMonitorRedaction.text(event.title, limit: 140), size: 11.5, weight: .semibold, color: NSColor(calibratedWhite: 0.94, alpha: 0.96))
+        let summary = wrappingLabel(WorkMonitorRedaction.text(event.summary, limit: 220), size: 10.5, color: Palette.secondaryText, lines: 2)
+        var detailViews: [NSView] = [title, summary]
+        if let target = event.target, !target.isEmpty {
+            let targetLabel = label(WorkMonitorRedaction.text(target, limit: 180), size: 10, color: Palette.secondaryText.withAlphaComponent(0.84))
+            targetLabel.toolTip = target
+            detailViews.append(targetLabel)
+        }
+        if let duration = event.duration, duration > 0 {
+            detailViews.append(label(formatDuration(duration), size: 10, color: statusColor(event.state)))
+        }
+        let detail = verticalStack(detailViews, spacing: 2)
+        let row = NSStackView(views: [time, marker, detail])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.spacing = 6
+        row.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return row
+    }
+
+    private func formatDuration(_ duration: TimeInterval) -> String {
+        let seconds = max(0, Int(duration.rounded()))
+        if seconds >= 60 { return "\(seconds / 60)m \(seconds % 60)s" }
+        return "\(seconds)s"
     }
 
     private func makeRecentWorkCard() -> NSView {
@@ -698,6 +1006,28 @@ final class WorkMonitorView: LayerView {
         elapsedLabel.stringValue = String(format: "耗时  %02d:%02d", seconds / 60, seconds % 60)
     }
 
+    private func updateFollowLatestState() {
+        guard !isProgrammaticScroll else { return }
+        let clip = scrollView.contentView
+        let atLatest = clip.bounds.maxY >= documentView.bounds.height - 28
+        followsLatest = atLatest
+        latestButton.isHidden = atLatest
+    }
+
+    private func scrollToLatestIfNeeded() {
+        guard followsLatest else {
+            latestButton.isHidden = false
+            return
+        }
+        let clip = scrollView.contentView
+        let maxY = max(0, documentView.bounds.height - clip.bounds.height)
+        isProgrammaticScroll = true
+        clip.scroll(to: NSPoint(x: 0, y: maxY))
+        scrollView.reflectScrolledClipView(clip)
+        isProgrammaticScroll = false
+        latestButton.isHidden = true
+    }
+
     private func statusSymbol(_ state: WorkMonitorItemState) -> String {
         switch state {
         case .success: return "✓"
@@ -758,11 +1088,33 @@ final class WorkMonitorView: LayerView {
         pinButton.toolTip = pinned ? "取消始终置顶" : "始终置顶"
     }
 
+    func setAutoOpen(_ enabled: Bool) {
+        autoOpenButton.state = enabled ? .on : .off
+    }
+
     @objc private func pinClicked() {
         onPinToggle?(pinButton.state == .on)
+    }
+
+    @objc private func autoOpenClicked() {
+        onAutoOpenToggle?(autoOpenButton.state == .on)
+    }
+
+    @objc private func scrollToLatestClicked() {
+        followsLatest = true
+        scrollToLatestIfNeeded()
     }
 
     @objc private func openMainClicked() {
         onOpenMainWindow?()
     }
+}
+
+private extension DateFormatter {
+    static let workMonitorTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 }

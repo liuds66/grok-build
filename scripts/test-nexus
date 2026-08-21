@@ -74,6 +74,8 @@ if [[ -x "${project_intelligence_node}" ]]; then
     "${repo_root}/tests/project-intelligence-acceptance.cjs"
   check "Work Monitor 信息层级/脱敏契约" "${project_intelligence_node}" \
     "${repo_root}/tests/work-monitor-unit.cjs"
+  check "Work Monitor 时间线/自动打开契约" "${project_intelligence_node}" \
+    "${repo_root}/tests/work-monitor-timeline-unit.cjs"
   check "Browser Verification 驱动/安全/布局契约" "${project_intelligence_node}" \
     "${repo_root}/tests/browser-verification-unit.cjs"
   check "Browser Verification 本地验收契约" "${project_intelligence_node}" \
