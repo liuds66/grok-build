@@ -6,6 +6,9 @@ extension ModelState {
         switch self {
         case .ready: return "模型就绪"
         case .missingKey: return "模型配置异常"
+        case .credentialsLoading: return "等待钥匙串授权"
+        case .credentialsDenied: return "钥匙串访问被拒绝"
+        case .credentialsError: return "钥匙串读取失败"
         case .unauthorized: return "API Key 无效"
         case .rateLimited: return "请求受限"
         case .offline: return "接口离线"

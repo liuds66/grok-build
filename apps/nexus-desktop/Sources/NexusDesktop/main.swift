@@ -656,6 +656,9 @@ enum MessageRole: String, Codable {
 enum ModelState: String {
     case ready
     case missingKey = "missing_key"
+    case credentialsLoading = "credentials_loading"
+    case credentialsDenied = "credentials_denied"
+    case credentialsError = "credentials_error"
     case unauthorized
     case rateLimited = "rate_limited"
     case offline
@@ -5635,7 +5638,20 @@ final class MainViewController: NSViewController {
 
     private func modelState(for session: ChatSession) -> ModelState {
         let configuration = NexusConfiguration.shared
-        guard configuration.hasAPIKey else { return .missingKey }
+        guard configuration.hasAPIKey else {
+            switch SecureCredentialStore.loadState {
+            case .loadingCredentials:
+                return .credentialsLoading
+            case .credentialsDenied:
+                return .credentialsDenied
+            case .credentialsError:
+                return .credentialsError
+            case .credentialsMissing:
+                return .missingKey
+            case .credentialsReady:
+                return .missingKey
+            }
+        }
         let model = configuration.value(named: "model", inSection: "model.openai-coding") ?? ""
         let endpoint = configuration.value(named: "base_url", inSection: "model.openai-coding") ?? ""
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -5706,6 +5722,24 @@ final class MainViewController: NSViewController {
             bottomBar.setModelStatus("模型就绪", color: Palette.success)
             bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
             chat.composer.setModelConfigured(true)
+            chat.setAgentStage("Idle")
+        case .credentialsLoading:
+            chat.setStatus("等待钥匙串授权", color: Palette.warning)
+            bottomBar.setModelStatus("等待钥匙串授权", color: Palette.warning)
+            bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            chat.composer.setModelConfigured(false)
+            chat.setAgentStage("Idle")
+        case .credentialsDenied:
+            chat.setStatus("钥匙串访问被拒绝，请在设置中重试", color: Palette.warning)
+            bottomBar.setModelStatus("钥匙串访问被拒绝", color: Palette.warning)
+            bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            chat.composer.setModelConfigured(false)
+            chat.setAgentStage("Idle")
+        case .credentialsError:
+            chat.setStatus("钥匙串读取失败，请在设置中重试", color: Palette.warning)
+            bottomBar.setModelStatus("钥匙串读取失败", color: Palette.warning)
+            bottomBar.setAgentStatus("Agent 空闲", color: Palette.secondaryText)
+            chat.composer.setModelConfigured(false)
             chat.setAgentStage("Idle")
         case .missingKey, .configurationError, .unauthorized:
             chat.setStatus("API 配置异常", color: Palette.warning)
