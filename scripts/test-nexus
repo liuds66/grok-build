@@ -72,6 +72,8 @@ if [[ -x "${project_intelligence_node}" ]]; then
     "${repo_root}/tests/project-intelligence-unit.cjs"
   check "Project Intelligence Acceptance Gate" "${project_intelligence_node}" \
     "${repo_root}/tests/project-intelligence-acceptance.cjs"
+  check "本地稳定签名/CI 回退契约" "${project_intelligence_node}" \
+    "${repo_root}/tests/local-signing-contract.cjs"
   check "Work Monitor 信息层级/脱敏契约" "${project_intelligence_node}" \
     "${repo_root}/tests/work-monitor-unit.cjs"
   check "Work Monitor 时间线/自动打开契约" "${project_intelligence_node}" \

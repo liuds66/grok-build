@@ -65,5 +65,20 @@ cp "${repo_root}/bin/nexus" "${local_runtime_dir}/nexus"
 cp "${agent_bin}" "${local_runtime_dir}/nexus-agent"
 chmod 755 "${local_runtime_dir}/nexus" "${local_runtime_dir}/nexus-agent"
 
-codesign --force --deep --sign - "${app_bundle}" >/dev/null
+# 默认保留 CI / 无 Apple 证书环境可用的 ad-hoc 签名；本地 Dogfood
+# 可以通过环境变量注入现有的 Apple Development 或 Developer ID identity。
+# 不把个人证书、Team ID 或私钥写入仓库。
+signing_identity="${AI_DEV_ONE_CODESIGN_IDENTITY:-}"
+if [[ -n "${signing_identity}" ]]; then
+  codesign --force --deep --sign "${signing_identity}" "${app_bundle}" >/dev/null
+  if [[ "${signing_identity}" == *"Developer ID Application"* ]]; then
+    signing_mode="DEVELOPER_ID_APPLICATION"
+  else
+    signing_mode="APPLE_DEVELOPMENT"
+  fi
+else
+  codesign --force --deep --sign - "${app_bundle}" >/dev/null
+  signing_mode="AD_HOC"
+fi
+echo "SIGNING_MODE=${signing_mode}"
 echo "桌面应用已构建：${app_bundle}"
