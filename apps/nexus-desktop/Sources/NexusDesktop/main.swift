@@ -930,9 +930,11 @@ enum SecureCredentialStore {
         var query = identity
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-        // 桌面启动不能弹出钥匙串授权对话框或卡住主线程；若当前登录会话
-        // 无法无交互读取，则立即回退到环境变量/设置页，而不是白屏。
-        query[kSecUseAuthenticationContext as String] = nonInteractiveAuthenticationContext()
+        // 读取凭据可能需要对当前签名的应用做一次钥匙串授权。该调用始终
+        // 位于 utility 队列，并受上层 timeout 保护；允许系统完成一次迁移
+        // 授权后，稳定签名会让后续冷启动保持无重复提示。不要附加
+        // interactionNotAllowed=true，否则旧条目的数据读取会一直悬挂，
+        // 即使元数据可读也无法进入 credentials_ready。
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         cacheLock.lock()
@@ -1058,7 +1060,10 @@ final class NexusConfiguration {
     /// 仅用于一次性迁移旧版本写入 TOML 的密钥；成功后会从配置中删除明文。
     func migrateLegacyAPIKeyIfNeeded() {
         guard let legacy = legacyAPIKey() else {
-            SecureCredentialStore.warmup()
+            // 启动流程会在窗口和控制器准备好后统一发起带回调的 warmup。
+            // 这里不能提前发起一个无回调请求：SecureCredentialStore 采用
+            // single-flight 读取，提前请求会让后续 UI 刷新回调被丢弃，冷启动
+            // 就会永久停在“等待钥匙串授权”。
             return
         }
         // 迁移放到后台，钥匙串不可用或等待登录时也不会阻塞 AppKit 启动。
