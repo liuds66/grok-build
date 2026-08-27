@@ -76,6 +76,7 @@ if [[ -x "${project_intelligence_node}" ]]; then
     "${repo_root}/tests/local-signing-contract.cjs"
   check "Work Monitor 信息层级/脱敏契约" "${project_intelligence_node}" \
     "${repo_root}/tests/work-monitor-unit.cjs"
+  check "全球情报 Live Data 架构/聚合/缓存契约" "${project_intelligence_node}" "${repo_root}/tests/intelligence-live-data-architecture-unit.cjs"
   check "Work Monitor 时间线/自动打开契约" "${project_intelligence_node}" \
     "${repo_root}/tests/work-monitor-timeline-unit.cjs"
   check "Browser Verification 驱动/安全/布局契约" "${project_intelligence_node}" \

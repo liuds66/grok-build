@@ -89,7 +89,7 @@ assert.ok(refreshStart >= 0 && refreshEnd > refreshStart, '必须存在可审计
 const refreshBlock = dashboard.slice(refreshStart, refreshEnd);
 assert.doesNotMatch(refreshBlock, /IntelligenceServiceController/);
 assert.doesNotMatch(refreshBlock, /URLSession/);
-assert.match(refreshBlock, /fixtureProvider\.snapshot/);
+assert.match(refreshBlock, /IntelligenceFixtureSnapshotBridge\.snapshot/);
 assert.match(dashboard, /V1 仅显示本地固定样本，不连接网络/);
 assert.match(dashboard, /本地固定样本/);
 assert.match(dashboard, /Timer\(timeInterval: 60, repeats: true\)/);

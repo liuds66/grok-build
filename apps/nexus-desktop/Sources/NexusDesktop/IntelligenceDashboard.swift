@@ -381,7 +381,10 @@ struct GlobalIntelligenceSnapshot {
     let insight: String
 }
 
-protocol IntelligenceDataProvider {
+// The formal `protocol IntelligenceDataProvider` contract lives in
+// IntelligenceDataArchitecture.swift.  This small legacy protocol keeps the
+// synchronous fixture snapshot API private to the frozen dashboard bridge.
+private protocol FixtureSnapshotProvider {
     var sourceMode: IntelligenceSourceMode { get }
     func snapshot(at date: Date) -> GlobalIntelligenceSnapshot
 }
@@ -390,7 +393,7 @@ protocol IntelligenceDataProvider {
 /// window release.  Timestamps advance with an explicit refresh, but the
 /// event content remains local and clearly labelled as demo data; no network
 /// request is made and no external service is started.
-final class FixtureIntelligenceDataProvider: IntelligenceDataProvider {
+final class FixtureIntelligenceDataProvider: FixtureSnapshotProvider {
     let sourceMode: IntelligenceSourceMode = .fixture
 
     func snapshot(at date: Date = Date()) -> GlobalIntelligenceSnapshot {
@@ -1498,7 +1501,7 @@ final class IntelligenceDashboardView: LayerView {
         serviceLabel.stringValue = "本地演示数据 · 正在刷新固定样本…"
         // V1 Provider 是同步且无副作用的；面板不会在打开、刷新或自动
         // 刷新时启动 OSIRIS，也不会访问任何网络端点。
-        let snapshot = fixtureProvider.snapshot(at: Date())
+        let snapshot = IntelligenceFixtureSnapshotBridge.snapshot(from: fixtureProvider, at: Date())
         applyFixtureSnapshot(snapshot)
         refreshInFlight = false
         refreshButton.isEnabled = true
