@@ -4834,6 +4834,7 @@ final class MainViewController: NSViewController {
     private let chat = ChatContentView()
     private let workspacePanel = WorkspacePanelView()
     private let split = ResizableSplitView()
+    private let spatialDashboard = SISpatialDashboardView()
     private let runner = NexusRunner()
     private let transactionStore = TaskTransactionStore.shared
     private lazy var githubWorkflowCoordinator = GitHubWorkflowCoordinator(
@@ -4904,6 +4905,8 @@ final class MainViewController: NSViewController {
         root.addSubview(top)
         root.addSubview(bottom)
         root.addSubview(split)
+        root.addSubview(spatialDashboard)
+        spatialDashboard.pinEdges(to: root)
         NSLayoutConstraint.activate([
             top.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             top.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -4919,10 +4922,16 @@ final class MainViewController: NSViewController {
             split.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -10),
         ])
         workspacePanel.isHidden = false
+        top.isHidden = true
+        bottom.isHidden = true
+        split.isHidden = true
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        spatialDashboard.onSectionSelected = { [weak self] section in
+            self?.showSpatialSection(section)
+        }
         sidebar.onNewTask = { [weak self] in self?.newTask() }
         sidebar.onSelect = { [weak self] id in self?.select(id: id) }
         sidebar.onSettings = { [weak self] in self?.openSettings() }
@@ -5163,6 +5172,50 @@ final class MainViewController: NSViewController {
 
     private func publishWorkMonitor() {
         workMonitorController?.update(summary: workSummary)
+        spatialDashboard.update(summary: workSummary)
+    }
+
+    private func showSpatialHome() {
+        topBar.isHidden = true
+        bottomBar.isHidden = true
+        split.isHidden = true
+        spatialDashboard.isHidden = false
+        spatialDashboard.update(summary: workSummary)
+    }
+
+    private func showEditorSurface() {
+        spatialDashboard.isHidden = true
+        topBar.isHidden = false
+        bottomBar.isHidden = false
+        split.isHidden = false
+    }
+
+    private func showSpatialSection(_ section: SISpatialSection) {
+        switch section {
+        case .overview:
+            showSpatialHome()
+        case .conversation:
+            showEditorSurface()
+            chat.composer.focus()
+        case .agents:
+            showEditorSurface()
+            showWorkspace(segment: 2)
+        case .workflows:
+            showEditorSurface()
+            showWorkspace(segment: 0)
+        case .tasks, .observability:
+            showEditorSurface()
+            showWorkMonitor()
+        case .knowledge:
+            showEditorSurface()
+            showWorkspace(segment: 1)
+        case .files, .devices, .plugins, .developer:
+            showEditorSurface()
+            showWorkspace(segment: 2)
+        case .models, .security, .settings:
+            showEditorSurface()
+            openSettings()
+        }
     }
 
     /// Reset only the presentation projection when the user changes Session.
@@ -7067,7 +7120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "AI Dev One · Route 2"
+        window.title = "SIBrain Nexus · Spatial SI OS"
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = Palette.forestBottom
         // Work Monitor 可以在主窗口关闭后重新打开它。保持 NSWindow 对象
